@@ -31,10 +31,16 @@ fn main() -> obj::Result<()> {
     let dir = tempfile::tempdir()?;
     let db = Db::open(dir.path().join("app.obj"))?;
     let id = db.insert(Order { customer_id: 1, total_cents: 4_200 })?;
+
+    // `T` lives only behind the closure's `&mut T`, so annotate the
+    // parameter — `|o: &mut Order|` — and inference fills in the rest
+    // (no `db.update::<Order, _>(…)` turbofish needed).
+    db.update(id, |o: &mut Order| o.total_cents = 5_000)?;
+
     let back: Order = db
         .get::<Order>(id)?
         .ok_or(obj::Error::InvalidArgument("just inserted"))?;
-    assert_eq!(back.total_cents, 4_200);
+    assert_eq!(back.total_cents, 5_000);
     Ok(())
 }
 ```
