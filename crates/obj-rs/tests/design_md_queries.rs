@@ -230,7 +230,6 @@ fn index_range_returns_recent_orders() {
     let recent: Vec<Order> = db
         .query::<Order>()
         .index_range("placed_at", last_week..now)
-        .expect("index_range")
         .fetch()
         .expect("fetch");
     assert_eq!(recent.len(), 30);
