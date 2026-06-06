@@ -1,0 +1,12 @@
+too-many-lines-threshold = 60
+
+msrv = "1.93"
+
+# Rule 8 — accept a `// SAFETY:` comment placed on the line above the statement
+# (or above an attribute) that contains an `unsafe` operation, not only
+# immediately before the `unsafe` token. Lets inline `unsafe { .. }` inside a
+# `let`/`match` be documented without hoisting the expression out, which would
+# otherwise inflate function length (Rule 4). (A comment directly above the block
+# is accepted by default.)
+accept-comment-above-statement = true
+accept-comment-above-attributes = true

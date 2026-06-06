@@ -1,0 +1,5 @@
+error: #[obj(history(...))] is no longer supported: schemas are now persisted on disk; bump #[obj(version = N)] and add a Document::migrate impl instead
+  --> tests/derive_compile_fail/history_removed.rs:10:7
+   |
+10 | #[obj(history(v1 = OrderV1))]
+   |       ^^^^^^^

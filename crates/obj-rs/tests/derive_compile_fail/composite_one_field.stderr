@@ -1,0 +1,5 @@
+error: composite needs ≥ 2 fields
+ --> tests/derive_compile_fail/composite_one_field.rs:4:7
+  |
+4 | #[obj(index_composite(fields = ("a")))]
+  |       ^^^^^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error: #[obj(index = each)] requires Vec<T>
+ --> tests/derive_compile_fail/each_on_non_vec.rs:6:12
+  |
+6 |     field: String,
+  |            ^^^^^^

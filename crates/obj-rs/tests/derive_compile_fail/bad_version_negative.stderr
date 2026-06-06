@@ -1,0 +1,5 @@
+error: expected unsigned integer for `version`
+ --> tests/derive_compile_fail/bad_version_negative.rs:4:17
+  |
+4 | #[obj(version = -1)]
+  |                 ^

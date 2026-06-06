@@ -1,0 +1,5 @@
+error: collection name must not be empty
+ --> tests/derive_compile_fail/empty_collection.rs:4:20
+  |
+4 | #[obj(collection = "")]
+  |                    ^^

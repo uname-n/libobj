@@ -1,0 +1,5 @@
+error: #[derive(obj::Document)] does not support generic types
+ --> tests/derive_compile_fail/generic_struct.rs:4:15
+  |
+4 | struct Generic<T> {
+  |               ^

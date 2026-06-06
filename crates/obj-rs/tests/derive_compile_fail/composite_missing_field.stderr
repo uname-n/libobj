@@ -1,0 +1,5 @@
+error: field 'nonexistent' not declared on struct
+ --> tests/derive_compile_fail/composite_missing_field.rs:4:7
+  |
+4 | #[obj(index_composite(fields = ("nonexistent", "a")))]
+  |       ^^^^^^^^^^^^^^^

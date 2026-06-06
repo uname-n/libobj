@@ -1,0 +1,5 @@
+error: expected a tuple of field-name string literals, e.g. ("a", "b")
+ --> tests/derive_compile_fail/short_composite_non_string.rs:4:16
+  |
+4 | #[obj(index = (1, 2))]
+  |                ^

@@ -1,0 +1,7 @@
+.pit
+.claude/worktrees/
+target/
+**/*.rs.bk
+*.swp
+.DS_Store
+/*.obj*

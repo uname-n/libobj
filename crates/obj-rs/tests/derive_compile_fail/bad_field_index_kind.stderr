@@ -1,0 +1,5 @@
+error: expected one of: unique, each (or omit `= ...` for a standard index)
+ --> tests/derive_compile_fail/bad_field_index_kind.rs:5:19
+  |
+5 |     #[obj(index = bogus)]
+  |                   ^^^^^

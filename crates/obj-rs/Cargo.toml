@@ -1,0 +1,85 @@
+[package]
+name = "obj-rs"
+description = "Embedded document database. Stable file format, full ACID, single-file portability."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage = "https://github.com/uname-n/libobj"
+readme = "README.md"
+keywords = ["database", "embedded", "document", "acid", "storage"]
+categories = ["database", "database-implementations", "data-structures"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lib]
+name = "obj"
+
+[dependencies]
+# Internal path deps: no `version` requirement — these resolve by path within
+# the workspace, so a workspace-wide version bump never needs touching here.
+# (Distribution is git-based, not crates.io; if that changes, a release tool
+# must reintroduce versions at publish time.)
+obj-core = { path = "../obj-core" }
+obj-derive = { path = "../obj-derive" }
+serde = { version = "1", features = ["derive"], optional = true }
+tracing = { version = "0.1", optional = true }
+blocking = { version = "1", optional = true }
+mimalloc = { version = "0.1", optional = true }
+
+[features]
+default = []
+serde = ["dep:serde"]
+tracing = ["dep:tracing", "obj-core/tracing"]
+compression = ["obj-core/compression"]
+encryption = ["obj-core/encryption"]
+async = ["dep:blocking"]
+fast-alloc = ["dep:mimalloc"]
+
+[dev-dependencies]
+tempfile = "3"
+trybuild = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing-subscriber = "0.3"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+rand = "0.9"
+rand_chacha = "0.9"
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+smol = "2"
+
+[[bench]]
+name = "concurrent_reads"
+harness = false
+
+[[bench]]
+name = "index_lookup"
+harness = false
+
+[[bench]]
+name = "index_range"
+harness = false
+
+[[bench]]
+name = "collection_scan"
+harness = false
+
+[[bench]]
+name = "integrity_1gb"
+harness = false
+
+[[bench]]
+name = "perf_table"
+harness = false
+
+[[bench]]
+name = "quick"
+harness = false
+
+[lints]
+workspace = true

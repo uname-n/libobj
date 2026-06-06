@@ -1,0 +1,24 @@
+[package]
+name = "obj-derive"
+description = "Procedural macros (#[derive(Document)]) for the obj embedded document database."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage = "https://github.com/uname-n/libobj"
+readme = "README.md"
+keywords = ["database", "embedded", "derive", "macro", "document"]
+categories = ["database", "rust-patterns"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["extra-traits", "full"] }
+quote = "1"
+proc-macro2 = "1"
+
+[lints]
+workspace = true

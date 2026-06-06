@@ -1,0 +1,75 @@
+[package]
+name = "obj-core"
+description = "Storage engine internals for the obj embedded document database (pager, WAL, B-tree, codec, catalog)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage = "https://github.com/uname-n/libobj"
+readme = "README.md"
+keywords = ["database", "embedded", "storage", "wal", "btree"]
+categories = ["database-implementations", "data-structures"]
+
+[dependencies]
+# 2.x to unify with postcard's transitive thiserror 2 (Rule 10: no duplicate versions).
+thiserror = "2"
+
+crc32c = "0.6"
+
+rand = "0.9"
+rand_chacha = "0.9"
+
+heapless = "0.8"
+
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", default-features = false, features = ["alloc", "experimental-derive"] }
+
+tracing = { version = "0.1", optional = true }
+
+lz4_flex = { version = "0.11", optional = true, default-features = false, features = ["std"] }
+
+chacha20poly1305 = { version = "0.10", optional = true, default-features = false, features = ["alloc"] }
+hkdf = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true, default-features = false }
+getrandom = { version = "0.2", optional = true }
+zeroize = { version = "1.8", optional = true, default-features = false, features = ["alloc", "serde"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+rustix = { version = "1", features = ["fs"] }
+
+[features]
+default = []
+fault-injection = []
+tracing = ["dep:tracing"]
+compression = ["dep:lz4_flex"]
+encryption = [
+    "dep:chacha20poly1305",
+    "dep:hkdf",
+    "dep:sha2",
+    "dep:getrandom",
+    "dep:zeroize",
+]
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[test]]
+name = "crash_cycles"
+path = "tests/crash_cycles.rs"
+required-features = ["fault-injection"]
+
+[[bench]]
+name = "btree_range"
+harness = false
+
+[[bench]]
+name = "btree_borrowed_scan"
+harness = false
+
+[lints]
+workspace = true

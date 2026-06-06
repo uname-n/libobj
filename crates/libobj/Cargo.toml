@@ -1,0 +1,41 @@
+[package]
+name = "libobj"
+description = "C ABI (cdylib + staticlib + libobj.h) for the obj embedded document database."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage = "https://github.com/uname-n/libobj"
+publish = false
+readme = "README.md"
+keywords = ["database", "embedded", "ffi", "c-api", "cdylib"]
+categories = ["database", "external-ffi-bindings"]
+
+[lib]
+name = "obj"
+crate-type = ["cdylib", "staticlib", "rlib"]
+doc = false
+
+[dependencies]
+# Internal path deps: no `version` requirement — resolved by path. This crate
+# is `publish = false`, and the workspace ships via git, so a version bump in
+# [workspace.package] needs no edits here.
+obj_engine = { package = "obj-rs", path = "../obj-rs", features = [
+    "encryption",
+    "compression",
+] }
+obj-core = { path = "../obj-core" }
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+cbindgen = { version = "0.27", default-features = false }
+serde = { version = "1", features = ["derive"] }
+
+[build-dependencies]
+cbindgen = { version = "0.27", default-features = false }
+
+[lints]
+workspace = true

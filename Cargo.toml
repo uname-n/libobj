@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.93"
+repository = "https://github.com/uname-n/libobj"
+authors = ["libobj contributors"]
+version = "0.1.0"
+
+[workspace.lints.rust]
+# Rule 10 — Zero warnings. Deny the whole rustc warnings group at the manifest
+# level so enforcement survives a stray RUSTFLAGS override, which would otherwise
+# shadow the `-D warnings` in .cargo/config.toml. priority -1 lets the specific
+# lints below raise the level further.
+warnings = { level = "deny", priority = -1 }
+# Rule 1 — No unbounded recursion. The only built-in lint bearing on this rule;
+# catches guaranteed-infinite recursion (no base case on any path). Bounded
+# recursion is enforced by the project's MAX_*_DEPTH conventions + review — no
+# lint can prove termination or see mutual/indirect recursion.
+unconditional_recursion = "deny"
+# Rule 6 — No shared mutable static. `forbid` makes any `static mut` (or a
+# reference to one) an un-overridable hard error across the workspace.
+static_mut_refs = "forbid"
+
+[workspace.lints.clippy]
+# Rule 10 — Zero clippy lints. Groups promoted warn -> deny so they fail the
+# build at the manifest level, not only via the `-D warnings` rustflag.
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+# Rule 4 — Functions <= 60 lines (threshold in clippy.toml). In `pedantic`;
+# pinned so it stays denied even if the pedantic group is later relaxed.
+too_many_lines = "deny"
+# Rule 6 — Declare bindings at first use. In `all` (style); pinned for the rule.
+needless_late_init = "deny"
+# Rules 7 & 8 (unwrap/expect/panic-family + undocumented `unsafe`) are NOT set
+# here: they are enabled per production crate via `#![cfg_attr(not(test),
+# deny(...))]` in each lib.rs, which keeps them off unit tests (cfg test) and
+# integration tests (separate crates) without scattering #[allow] across the
+# whole test suite.
+
+[profile.release]
+overflow-checks = true
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+overflow-checks = true

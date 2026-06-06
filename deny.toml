@@ -1,0 +1,58 @@
+
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+all-features = false
+no-default-features = false
+
+[advisories]
+version = 2
+ignore = []
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+]
+confidence-threshold = 0.93
+unused-allowed-license = "allow"
+
+[bans]
+# Rule 10 — duplicate dependency versions fail the check (treat warnings as
+# errors). Known-unavoidable transitive duplicates are listed in `skip` with a
+# reason, mirroring the `// allow: WHY` convention for lint suppressions.
+multiple-versions = "deny"
+wildcards = "deny"
+highlight = "all"
+deny = []
+skip = [
+    # getrandom has three incompatible majors in this tree, from three different
+    # real sources — none locally unifiable without an upstream/API migration:
+    #   0.2  obj-core's optional `encryption` feature dep (`dep:getrandom`)
+    #   0.3  transitive via `rand 0.9` -> `rand_core`
+    #   0.4  dev/build tooling only (tempfile, cbindgen, proptest)
+    # Skipping two of the three leaves a single counted instance.
+    "getrandom@0.2",
+    "getrandom@0.3",
+]
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

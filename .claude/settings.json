@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Edit",
+      "Write",
+      "Bash(cargo test *)",
+      "Bash(cargo clippy *)",
+      "Bash(cargo build *)",
+      "Bash(cargo deny *)",
+      "Bash(cargo audit *)",
+      "Bash(cargo fmt *)",
+      "Bash(cargo bench *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git status *)",
+      "Bash(git worktree *)",
+      "Bash(git branch *)",
+      "mcp__pit__pit_get_issue",
+      "mcp__pit__pit_list_issues",
+      "mcp__pit__pit_search_issues",
+      "mcp__pit__pit_update_issue",
+      "mcp__pit__pit_add_comment",
+      "mcp__pit__pit_create_issue"
+    ]
+  },
+  "enabledMcpjsonServers": [
+    "pit"
+  ],
+  "worktree": {
+    "baseRef": "head",
+    "symlinkDirectories": [".pit"]
+  }
+}

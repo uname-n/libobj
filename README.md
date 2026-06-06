@@ -1,0 +1,124 @@
+# libobj
+
+> An embedded document database. Dependable. Portable. Zero-infrastructure.
+
+`libobj` is a self-contained, serverless, single-file document database with a
+stable on-disk format and full ACID semantics. It is to document storage what
+SQLite is to relational storage: no server, no setup — just a file.
+
+The engine is written in Rust and shipped as a Rust crate and a C ABI.
+
+## Quickstart (Rust)
+
+```toml
+# Cargo.toml
+[dependencies]
+obj-rs = { git = "https://github.com/uname-n/libobj", tag = "v0.1.0" }
+serde = { version = "1", features = ["derive"] }
+```
+
+```rust
+use obj::Db;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize, obj::Document)]
+struct Order {
+    customer_id: u64,
+    total_cents: u64,
+}
+
+fn main() -> obj::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db = Db::open(dir.path().join("app.obj"))?;
+    let id = db.insert(Order { customer_id: 1, total_cents: 4_200 })?;
+    let back: Order = db
+        .get::<Order>(id)?
+        .ok_or(obj::Error::InvalidArgument("just inserted"))?;
+    assert_eq!(back.total_cents, 4_200);
+    Ok(())
+}
+```
+
+Collection name and schema version default to the type name and `1`; override
+with `#[obj(collection = "...", version = N)]`. See the crate docs for queries,
+indexes, transactions, and migrations.
+
+## Performance
+
+The defaults favour durability and a small memory footprint over raw
+throughput. Three levers, in rough order of impact:
+
+- **Batch writes into one transaction.** Every committed write
+  transaction costs one WAL durability sync under the default
+  `SyncMode::Full`, so a single-document insert is dominated by that one
+  sync. Inserting many documents inside one `db.transaction(|tx| …)`
+  closure pays the sync once instead of once per row — dramatically
+  faster per document. Split very large batches into chunks of a few
+  thousand to stay under the WAL size limit.
+- **Size the cache for the working set.** The LRU page cache defaults to
+  64 frames (256 KiB). Read-heavy services over a large database should
+  raise `Config::cache_size` (tens of MiB is a reasonable start) so the
+  hot pages stay resident.
+- **Relax the sync mode only if durability allows.** `SyncMode::Full`
+  (default) survives system-wide power loss; `SyncMode::Normal` is
+  crash/panic-durable with faster commits but can lose the last few
+  transactions on sudden power loss; `SyncMode::Off` makes no durability
+  call and is for tests/benchmarks/scratch data only.
+
+```rust
+use obj::{Config, Db, SyncMode};
+
+let cfg = Config::default()
+    .cache_size(64 * 1024 * 1024) // 64 MiB hot set
+    .sync_mode(SyncMode::Normal);  // crash-durable, faster commits
+let db = Db::open_with("app.obj", cfg)?;
+```
+
+See the `obj-rs` crate docs for the full set of `Config` knobs and their
+durability tradeoffs.
+
+## Workspace
+
+| Crate                          | What it is                                                              |
+|--------------------------------|-------------------------------------------------------------------------|
+| [`obj-rs`](crates/obj-rs)      | The public Rust crate. Imported as `obj` (`use obj::Db`).               |
+| [`obj-core`](crates/obj-core)  | Storage-engine internals: pager, WAL, B+tree, codec, catalog.           |
+| [`obj-derive`](crates/obj-derive) | The `#[derive(obj::Document)]` proc-macro.                           |
+| [`libobj`](crates/libobj)      | The C ABI (`cdylib` + `staticlib` + generated `include/libobj.h`).      |
+
+`libobj` ships as a compiled artifact — the `cdylib`/`staticlib` plus
+generated header.
+
+## C ABI
+
+C consumers link against `libobj` (the `cdylib`/`staticlib`) and include the
+generated [`crates/libobj/include/libobj.h`](crates/libobj/include/libobj.h).
+The header is regenerated from the Rust signatures by `cargo build -p libobj`
+and validated against the committed copy by a drift test.
+
+## Stability
+
+v1.0 froze the on-disk format (`format_major = 1`) and the public Rust API under
+strict SemVer. Backwards-incompatible changes require a 2.0 release with a
+migration tool; readers still open pre-1.0 (`format_major = 0`) files.
+
+## Coverage
+
+Install [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) once:
+
+```sh
+cargo install cargo-llvm-cov --locked
+```
+
+Then measure coverage (not part of the mandatory safety checks):
+
+```sh
+cargo llvm-cov --workspace --all-features --summary-only --fail-under-lines 85
+```
+
+See [CLAUDE.md](CLAUDE.md) for the ratchet plan.
+
+## License
+
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your
+option.

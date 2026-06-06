@@ -1,0 +1,5 @@
+error: `version` declared twice
+ --> tests/derive_compile_fail/duplicate_struct_attr.rs:5:7
+  |
+5 | #[obj(version = 3)]
+  |       ^^^^^^^
