@@ -369,6 +369,26 @@ fn query_sort_by_int_field_ascends() {
 }
 
 #[test]
+fn query_sort_by_key_matches_sort_by_dynamic() {
+    let (db, _dir) = fresh_db();
+    seed_reversed(&db, 100);
+    let via_key: Vec<Order> = db
+        .query::<Order>()
+        .sort_by_key(|o| o.placed_at)
+        .fetch()
+        .expect("sort_by_key fetch");
+    let via_dynamic: Vec<Order> = db
+        .query::<Order>()
+        .sort_by(|o| Dynamic::U64(o.placed_at))
+        .fetch()
+        .expect("sort_by fetch");
+    assert_eq!(
+        via_key, via_dynamic,
+        "sort_by_key(|o| o.placed_at) must order identically to sort_by(|o| Dynamic::U64(o.placed_at))",
+    );
+}
+
+#[test]
 fn query_sort_by_string_field_ascends() {
     let (db, _dir) = fresh_db();
     seed_orders(&db, 10);

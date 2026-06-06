@@ -153,6 +153,18 @@ where
         self
     }
 
+    /// Sort by an extracted key, mapping it through [`Into<Dynamic>`].
+    /// See [`crate::Query::sort_by_key`]. Adds a `Send` bound to the
+    /// closure so it can ride the blocking-task hop.
+    #[must_use]
+    pub fn sort_by_key<K, F>(self, key: F) -> Self
+    where
+        F: Fn(&T) -> K + Send + 'static,
+        K: Into<Dynamic>,
+    {
+        self.sort_by(move |doc| key(doc).into())
+    }
+
     /// Sort by raw bytes. See [`crate::Query::sort_by_bytes`].
     #[must_use]
     pub fn sort_by_bytes<F>(mut self, key: F) -> Self

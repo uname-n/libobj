@@ -277,6 +277,38 @@ where
         self
     }
 
+    /// Sort the result by `key`'s output, mapping each extracted key
+    /// through [`Into<Dynamic>`] internally.
+    ///
+    /// Ergonomic sibling of [`Query::sort_by`] for the common
+    /// scalar-field case: where `sort_by` makes the caller wrap the
+    /// field (`.sort_by(|o| Dynamic::U64(o.placed_at))`), `sort_by_key`
+    /// accepts any `K: Into<Dynamic>` and wraps it for them
+    /// (`.sort_by_key(|o| o.placed_at)`). The extracted key is run
+    /// through `.into()` and then forwarded onto the exact `sort_by`
+    /// path, so ordering, last-call-wins, sort-buffer bound, and the
+    /// fetch-time [`Error::SortKeyEncode`] behaviour are all identical
+    /// to `sort_by`.
+    ///
+    /// Use [`Query::sort_by`] when the key is already a `Dynamic`, or
+    /// [`Query::sort_by_bytes`] to supply pre-encoded sort bytes.
+    ///
+    /// # Errors at fetch time
+    ///
+    /// Same as [`Query::sort_by`] — see that method's docs.
+    ///
+    /// # Sort-buffer bound
+    ///
+    /// Same as [`Query::sort_by`] — see that method's docs.
+    #[must_use]
+    pub fn sort_by_key<K, F>(self, key: F) -> Self
+    where
+        F: Fn(&T) -> K + 'static,
+        K: Into<Dynamic>,
+    {
+        self.sort_by(move |doc| key(doc).into())
+    }
+
     /// Sort the result by `key`'s raw byte output in ascending order.
     ///
     /// Companion to [`Query::sort_by`] that lets callers supply the
