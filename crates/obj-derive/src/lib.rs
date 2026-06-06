@@ -78,6 +78,13 @@
 //!   supplies a custom backfill expression for a field added in this
 //!   version, used instead of `Default::default()` when the field is
 //!   absent from the older shape.
+//! - `default_with = <path>` (field-level) — paired with
+//!   `auto_migrate`, points a newly-added field at a backfill function
+//!   `fn(old: &Dynamic, from_version: u32) -> obj::Result<FieldTy>`.
+//!   The function receives the old record (so it can derive the new
+//!   value from any prior field) and the stored version, and may fail.
+//!   It fires on the same absent branch as `default`. `default` and
+//!   `default_with` on the same field is a compile error.
 //!
 //! The companion `impl ::obj::Schema` block's `schema()` body maps
 //! each field to a `DynamicSchema` variant. Scalar primitives
@@ -294,13 +301,15 @@ fn emit_schema_body_struct(input: &DeriveInput) -> syn::Result<proc_macro2::Toke
 ///   `Dynamic::deserialize` and propagated with `?` on a type / shape
 ///   mismatch.
 /// - **Absent** — the field was ADDED in this version; it backfills
-///   with the per-field `#[obj(default = <expr>)]` expression if one
-///   was supplied, otherwise `::core::default::Default::default()`.
+///   with the per-field `#[obj(default_with = <path>)]` function
+///   (`#path(&dynamic, _from_version)?`) if one was supplied, else the
+///   per-field `#[obj(default = <expr>)]` expression, else
+///   `::core::default::Default::default()`.
 ///
-/// `_from_version` is ignored: the additive case treats every older
-/// version identically (read what is there, default the rest). Types
-/// needing a non-`Default` backfill that varies by version, a field
-/// removal with side effects, or a type change must hand-write the
+/// `_from_version` is forwarded to any `default_with` function but is
+/// otherwise unused: the additive case treats every older version
+/// identically (read what is there, default the rest). Types needing a
+/// field removal with side effects or a type change must hand-write the
 /// full `impl Document` and override `migrate` themselves.
 fn emit_auto_migrate_body(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let fields = named_fields(input)?;
@@ -322,8 +331,11 @@ fn emit_auto_migrate_body(input: &DeriveInput) -> syn::Result<proc_macro2::Token
 
 /// Emit one `field: <expr>` initialiser for the auto-migrate `Self {
 /// ... }` literal. Reads the field from the `Dynamic::Map` by name,
-/// deserialising the present sub-value or falling back to the
-/// field's backfill expression when absent.
+/// deserialising the present sub-value or falling back to the field's
+/// backfill when absent. The absent-branch backfill is, in priority
+/// order: a `#[obj(default_with = <path>)]` function applied to the old
+/// record (`#path(&dynamic, _from_version)?`), a `#[obj(default =
+/// <expr>)]` static expression, or `Default::default()`.
 fn emit_auto_migrate_field(field: &Field) -> syn::Result<proc_macro2::TokenStream> {
     let ident = field
         .ident
@@ -331,8 +343,11 @@ fn emit_auto_migrate_field(field: &Field) -> syn::Result<proc_macro2::TokenStrea
         .ok_or_else(|| syn::Error::new(field.span(), "expected named field"))?;
     let name = ident.to_string();
     let ty = &field.ty;
-    let backfill = field_default_expr(field)?
-        .unwrap_or_else(|| quote! { ::core::default::Default::default() });
+    let backfill = match field_backfill(field)? {
+        Some(Backfill::Expr(ts)) => ts,
+        Some(Backfill::With(path)) => quote! { #path(&dynamic, _from_version)? },
+        None => quote! { ::core::default::Default::default() },
+    };
     Ok(quote! {
         #ident: match ::obj::Dynamic::get(&dynamic, #name) {
             ::std::option::Option::Some(__obj_v) => {
@@ -343,32 +358,60 @@ fn emit_auto_migrate_field(field: &Field) -> syn::Result<proc_macro2::TokenStrea
     })
 }
 
-/// Parse a field-level `#[obj(default = <expr>)]` backfill override.
+/// A per-field backfill source for the absent (newly-added-field)
+/// branch of an `auto_migrate`-generated `migrate`.
+enum Backfill {
+    /// `#[obj(default = <expr>)]` — a static expression with no access
+    /// to the migrating record; emitted verbatim.
+    Expr(proc_macro2::TokenStream),
+    /// `#[obj(default_with = <path>)]` — a function
+    /// `fn(old: &Dynamic, from_version: u32) -> obj::Result<FieldTy>`
+    /// that receives the old record and the stored version, so the
+    /// backfill can read any prior field and may fail. Emitted as
+    /// `#path(&dynamic, _from_version)?`.
+    With(syn::Path),
+}
+
+/// Parse a field-level `#[obj(default = <expr>)]` /
+/// `#[obj(default_with = <path>)]` backfill override.
 ///
-/// Returns the user-supplied expression token stream, or `None` when
-/// the field carries no `default` key (the caller then uses
-/// `Default::default()`). A `default` key declared twice on one field
-/// is a compile error.
-fn field_default_expr(field: &Field) -> syn::Result<Option<proc_macro2::TokenStream>> {
-    let mut expr: Option<proc_macro2::TokenStream> = None;
+/// Returns the parsed [`Backfill`], or `None` when the field carries
+/// neither key (the caller then uses `Default::default()`). `default`
+/// supplies a static expression; `default_with` supplies a function
+/// applied to the old record. Either key declared twice, or `default`
+/// and `default_with` declared on the **same field**, is a compile
+/// error.
+fn field_backfill(field: &Field) -> syn::Result<Option<Backfill>> {
+    let mut backfill: Option<Backfill> = None;
     for attr in &field.attrs {
         if !attr.path().is_ident("obj") {
             continue;
         }
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("default") {
-                if expr.is_some() {
-                    return Err(meta.error("`default` declared twice on the same field"));
+                if backfill.is_some() {
+                    return Err(meta.error(
+                        "`default` / `default_with` declared twice on the same field",
+                    ));
                 }
-                let value = meta.value()?;
-                let parsed: syn::Expr = value.parse()?;
-                expr = Some(quote! { #parsed });
+                let parsed: syn::Expr = meta.value()?.parse()?;
+                backfill = Some(Backfill::Expr(quote! { #parsed }));
+                return Ok(());
+            }
+            if meta.path.is_ident("default_with") {
+                if backfill.is_some() {
+                    return Err(meta.error(
+                        "`default` / `default_with` declared twice on the same field",
+                    ));
+                }
+                let path: syn::Path = meta.value()?.parse()?;
+                backfill = Some(Backfill::With(path));
                 return Ok(());
             }
             skip_unrelated_field_meta(&meta)
         })?;
     }
-    Ok(expr)
+    Ok(backfill)
 }
 
 /// Consume (and ignore) the payload of a field-`#[obj(...)]` key that
@@ -648,8 +691,9 @@ struct StructAttrs {
     /// field is read from the older record's `Dynamic::Map` by name;
     /// fields present in the old shape carry over, fields absent from
     /// it (added in this version) fall back to `Default::default()` (or
-    /// a per-field `#[obj(default = <expr>)]` backfill). Struct-only;
-    /// declared twice is a compile error.
+    /// a per-field `#[obj(default = <expr>)]` /
+    /// `#[obj(default_with = <path>)]` backfill). Struct-only; declared
+    /// twice is a compile error.
     auto_migrate: bool,
 }
 
@@ -1054,10 +1098,12 @@ fn parse_one_field_attr(
             custom_name = Some(s);
             return Ok(());
         }
-        if meta.path.is_ident("default") {
+        if meta.path.is_ident("default") || meta.path.is_ident("default_with") {
             return skip_unrelated_field_meta(&meta);
         }
-        Err(meta.error("unknown obj field attribute (expected `index`, `name`, or `default`)"))
+        Err(meta.error(
+            "unknown obj field attribute (expected `index`, `name`, `default`, or `default_with`)",
+        ))
     })?;
     finalize_field_index(field, field_name, kind, custom_name, specs)
 }

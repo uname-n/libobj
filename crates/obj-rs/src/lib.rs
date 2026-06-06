@@ -535,7 +535,11 @@ pub use serde::{Deserialize, Serialize};
 /// from the older record's `Dynamic` map by name — pre-existing fields
 /// carry over (deserialised into the current field type) and fields
 /// added in this version backfill with `Default::default()`, or with a
-/// per-field `#[obj(default = <expr>)]` override.
+/// per-field `#[obj(default = <expr>)]` override. When the backfill
+/// must read the old record (e.g. derive a new field from an existing
+/// one), use `#[obj(default_with = <path>)]` to point the field at a
+/// function `fn(old: &Dynamic, from_version: u32) -> obj::Result<FieldTy>`
+/// instead — it fires on the same absent branch and may fail.
 ///
 /// ```
 /// # fn main() -> obj::Result<()> {

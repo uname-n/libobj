@@ -5,8 +5,9 @@
 //! fields. The generated body reads every current field from the
 //! older record's `Dynamic::Map` by name — present fields carry over,
 //! fields added in this version backfill with `Default::default()`
-//! (or a per-field `#[obj(default = <expr>)]` override). No
-//! hand-written `migrate` is needed.
+//! (or a per-field `#[obj(default = <expr>)]` expression, or a
+//! `#[obj(default_with = <path>)]` function applied to the old
+//! record). No hand-written `migrate` is needed.
 //!
 //! Each test mirrors the real engine flow `schema_catalog_worked_examples.rs`
 //! uses: a v1 type inserts through the real `Db::insert` (which
@@ -178,6 +179,89 @@ fn custom_default_backfills_with_expression_not_type_default() {
             tier: "standard".to_owned(),
             credits: 100,
         },
+    );
+}
+
+mod default_with_fn {
+    use super::{Deserialize, Serialize};
+    use obj::Dynamic;
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, obj::Document)]
+    #[obj(version = 1, collection = "auto_default_with")]
+    pub struct CustomerV1 {
+        pub name: String,
+        pub email: String,
+    }
+
+    /// Backfill the new `tier` field by reading the existing `email`
+    /// out of the OLD record. Receives `(old, from_version)` and may
+    /// fail — `get_str` errors (propagated via `?`) on a wrong shape.
+    pub fn tier_from_email(old: &Dynamic, _from: u32) -> obj::Result<String> {
+        let email = old.get_str("email")?;
+        Ok(if email.ends_with("@bigcorp.com") {
+            "enterprise".to_owned()
+        } else {
+            "standard".to_owned()
+        })
+    }
+
+    /// v2 adds `tier`, backfilled by a `default_with` function that
+    /// derives the value from the existing `email` field rather than a
+    /// static default.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, obj::Document)]
+    #[obj(version = 2, collection = "auto_default_with", auto_migrate)]
+    pub struct CustomerV2 {
+        pub name: String,
+        pub email: String,
+        #[obj(default_with = tier_from_email)]
+        pub tier: String,
+    }
+}
+
+#[test]
+fn default_with_fn_derives_field_from_existing_record() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("auto_default_with.obj");
+
+    let (big_id, small_id) = {
+        let db = Db::open(&path).expect("open v1");
+        let big = db
+            .insert(default_with_fn::CustomerV1 {
+                name: "Ada".to_owned(),
+                email: "ada@bigcorp.com".to_owned(),
+            })
+            .expect("insert big");
+        let small = db
+            .insert(default_with_fn::CustomerV1 {
+                name: "Grace".to_owned(),
+                email: "grace@example.com".to_owned(),
+            })
+            .expect("insert small");
+        (big, small)
+    };
+
+    let db = Db::open(&path).expect("reopen v2");
+    let big: default_with_fn::CustomerV2 = db.get(big_id).expect("get big").expect("present");
+    let small: default_with_fn::CustomerV2 =
+        db.get(small_id).expect("get small").expect("present");
+
+    assert_eq!(
+        big,
+        default_with_fn::CustomerV2 {
+            name: "Ada".to_owned(),
+            email: "ada@bigcorp.com".to_owned(),
+            tier: "enterprise".to_owned(),
+        },
+        "default_with derived `tier` from the @bigcorp.com email",
+    );
+    assert_eq!(
+        small,
+        default_with_fn::CustomerV2 {
+            name: "Grace".to_owned(),
+            email: "grace@example.com".to_owned(),
+            tier: "standard".to_owned(),
+        },
+        "default_with derived `tier` from a non-bigcorp email",
     );
 }
 
