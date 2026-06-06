@@ -547,6 +547,21 @@ impl Db {
     /// entry but in-flight reads complete against their pinned
     /// snapshot.
     ///
+    /// # Choosing a receiver
+    ///
+    /// This `&mut self` form and the `&self`
+    /// [`attach_shared`](Self::attach_shared) do the **same work** —
+    /// the attachment registry is interior-mutable and mutex-guarded,
+    /// so neither receiver is "more correct" at the storage layer. The
+    /// `&mut self` here is about *exclusivity*, not necessity: prefer
+    /// it when you own the `Db` outright, because an exclusive borrow
+    /// is the clearest way to say "nothing else is touching this `Db`
+    /// while I attach." Use [`attach_shared`](Self::attach_shared)
+    /// when the handle is shared and `&mut self` is unavailable —
+    /// most commonly an `Arc<Db>` cloned across threads. The same
+    /// split applies to [`detach`](Self::detach) /
+    /// [`detach_shared`](Self::detach_shared).
+    ///
     /// # Examples
     ///
     /// ```
@@ -611,6 +626,13 @@ impl Db {
     /// the database at `path` under `namespace` through `&self`, for
     /// callers that hold a shared handle (e.g. an `Arc<Db>`) and
     /// cannot obtain `&mut self`.
+    ///
+    /// **This is the form you need when the `Db` is behind an `Arc`**
+    /// (or any shared reference): an `Arc<Db>` hands out `&Db`, never
+    /// `&mut Db`, so [`Self::attach`] is simply not callable. The
+    /// receiver is the only difference between the two — see
+    /// [`attach`](Self::attach)'s *Choosing a receiver* section for
+    /// the full rationale.
     ///
     /// Behaviour is identical to [`Self::attach`]: the attachment
     /// registry is interior-mutable, guarded by the same per-`Db`
@@ -701,6 +723,11 @@ impl Db {
     /// the attached env; detach removes the registry entry, but the
     /// in-flight read may still complete against its pinned
     /// snapshot.
+    ///
+    /// This `&mut self` form mirrors [`Self::attach`]; when you hold
+    /// only a shared handle (e.g. an `Arc<Db>`), use the `&self`
+    /// [`detach_shared`](Self::detach_shared) instead. See
+    /// [`attach`](Self::attach)'s *Choosing a receiver* section.
     ///
     /// # Errors
     ///

@@ -178,6 +178,18 @@
 //! [`Db::detach`] removes the registry entry but in-flight reads
 //! complete against their pinned snapshot.
 //!
+//! **Which one?** Attach/detach come in two receiver flavours that do
+//! the same work. Reach for the `&mut self` [`Db::attach`] /
+//! [`Db::detach`] when you own the `Db` outright (an exclusive borrow
+//! is the simplest expression of "no reads are racing this mutation").
+//! Reach for the `&self` [`Db::attach_shared`] / [`Db::detach_shared`]
+//! when the handle is shared and you cannot get `&mut` — typically an
+//! `Arc<Db>` cloned across threads. Both mutate the same
+//! interior-mutable, mutex-guarded registry, so the choice is purely
+//! about which receiver your call site can produce. (The async
+//! `AsyncDb::attach` only offers the `&mut self` form; see its docs
+//! for how it behaves when the inner `Arc` is shared.)
+//!
 //! [`Db::backup_to`] writes a self-contained `.obj` file at the
 //! LSN of an internally-taken reader snapshot. Writers continue
 //! against the source; post-snapshot writes are NOT in the
