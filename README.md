@@ -72,6 +72,40 @@ struct Customer {
 }
 ```
 
+When the backfill must read the old record — deriving the new field from an
+existing one — point the field at a function with `#[obj(default_with = ...)]`
+instead of a static expression. It fires on the same absent-field branch, is
+handed the old record plus the stored version, and may fail:
+
+```rust
+use obj::Dynamic;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize, obj::Document)]
+#[obj(version = 2, collection = "customers", auto_migrate)]
+struct Customer {
+    name: String,
+    email: String,
+    #[obj(default_with = tier_from_email)] // derived, not a constant
+    tier: String,
+}
+
+// fn(old: &Dynamic, from_version: u32) -> obj::Result<FieldTy>
+fn tier_from_email(old: &Dynamic, _from: u32) -> obj::Result<String> {
+    let email = old.get_str("email")?;
+    Ok(if email.ends_with("@bigcorp.com") {
+        "enterprise".to_owned()
+    } else {
+        "standard".to_owned()
+    })
+}
+```
+
+Because migration runs lazily on every read of an unmigrated record (the
+result is not written back), keep a `default_with` function pure and cheap —
+it's for values computable from the record, not for external I/O such as a
+network or database lookup.
+
 `auto_migrate` covers pure-additive changes only. Field removals, renames,
 type changes, and version-dependent backfills need a hand-written
 `Document::migrate` — including the recommended `From`-per-version pattern for
