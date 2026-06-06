@@ -30,17 +30,17 @@
 //! Struct-level composite (one or more occurrences compose, each
 //! adding one `Composite` `IndexSpec`):
 //!
-//! - `index_composite(fields = ("a", "b"), name = "by_a_b")` — emit a
-//!   `Composite` `IndexSpec` spanning the listed fields. `name`
-//!   defaults to the field names joined with `__`. The referenced
+//! - `index = ("a", "b")` — **canonical** composite form. Emits a
+//!   `Composite` `IndexSpec` spanning the listed fields. The referenced
 //!   fields must exist on the struct; fewer than two is a compile
-//!   error.
-//! - `index = ("a", "b")` — short form, equivalent to
-//!   `index_composite(fields = ("a", "b"))`. Same downstream
-//!   validation (≥ 2 fields, each declared on the struct). The
-//!   default index name is the fields joined with `__`; there is no
-//!   `name = "..."` slot on the short form — use `index_composite`
-//!   when a custom name is required. Both syntaxes coexist.
+//!   error. The default index name is the fields joined with `__`; an
+//!   optional sibling `name = "..."` in the same `#[obj(...)]`
+//!   overrides it, e.g. `#[obj(index = ("a", "b"), name = "by_a_b")]`.
+//! - `index_composite(fields = ("a", "b"), name = "by_a_b")` — older
+//!   long form, also accepted. Equivalent to the short form with the
+//!   same downstream validation (≥ 2 fields, each declared on the
+//!   struct); `name` likewise defaults to the fields joined with `__`.
+//!   Prefer the short `index = (...)` form in new code.
 //!
 //! Field-level (`#[obj(...)]` on a struct field):
 //!
@@ -670,9 +670,14 @@ fn parse_struct_attrs(input: &DeriveInput) -> syn::Result<StructAttrs> {
 /// Parse a single `#[obj(...)]` attribute into `acc`. Duplicate
 /// scalar keys (within this attribute OR already present in `acc`)
 /// error; `index_composite(...)` is non-scalar and appends new
-/// entries. The removed `history(...)` key is rejected with a
-/// migration-pointing diagnostic.
+/// entries. A short-form `index = (...)` and its optional sibling
+/// `name = "..."` are accumulated locally and merged once the whole
+/// attribute has parsed (see [`apply_struct_index_name`]). The removed
+/// `history(...)` key is rejected with a migration-pointing
+/// diagnostic.
 fn parse_one_struct_attr(attr: &Attribute, acc: &mut StructAttrs) -> syn::Result<()> {
+    let mut short: Option<CompositeAttr> = None;
+    let mut short_name: Option<LitStr> = None;
     attr.parse_nested_meta(|meta| {
         if meta.path.is_ident("version") {
             return parse_struct_version(&meta, acc);
@@ -686,8 +691,17 @@ fn parse_one_struct_attr(attr: &Attribute, acc: &mut StructAttrs) -> syn::Result
             return Ok(());
         }
         if meta.path.is_ident("index") {
-            let composite = parse_struct_index_short(&meta)?;
-            acc.composites.push(composite);
+            if short.is_some() {
+                return Err(meta.error("`index` declared twice in one #[obj(...)]"));
+            }
+            short = Some(parse_struct_index_short(&meta)?);
+            return Ok(());
+        }
+        if meta.path.is_ident("name") {
+            if short_name.is_some() {
+                return Err(meta.error("`name` declared twice"));
+            }
+            short_name = Some(meta.value()?.parse()?);
             return Ok(());
         }
         if meta.path.is_ident("history") {
@@ -713,7 +727,42 @@ fn parse_one_struct_attr(attr: &Attribute, acc: &mut StructAttrs) -> syn::Result
         Err(meta.error(
             "unknown obj attribute (expected `version`, `collection`, `index`, `index_composite`, `schema`, or `auto_migrate`)",
         ))
-    })
+    })?;
+    apply_struct_index_name(acc, short, short_name)
+}
+
+/// Merge an optional struct-level `name = "..."` into the short-form
+/// `index = (...)` parsed from the same `#[obj(...)]` attribute, then
+/// push the resulting [`CompositeAttr`]. An empty name is rejected
+/// (mirroring `index_composite(name = "...")`), and a `name` with no
+/// accompanying short `index` in the same attribute is an error —
+/// `name` at struct level only ever qualifies a short composite index.
+fn apply_struct_index_name(
+    acc: &mut StructAttrs,
+    short: Option<CompositeAttr>,
+    short_name: Option<LitStr>,
+) -> syn::Result<()> {
+    match (short, short_name) {
+        (Some(mut composite), name) => {
+            if let Some(lit) = name {
+                let s = lit.value();
+                if s.is_empty() {
+                    return Err(syn::Error::new(
+                        lit.span(),
+                        "composite index name must not be empty",
+                    ));
+                }
+                composite.custom_name = Some(s);
+            }
+            acc.composites.push(composite);
+            Ok(())
+        }
+        (None, Some(lit)) => Err(syn::Error::new(
+            lit.span(),
+            "struct-level `name = \"...\"` requires an `index = (...)` in the same #[obj(...)]",
+        )),
+        (None, None) => Ok(()),
+    }
 }
 
 /// Parse the short composite-index form `#[obj(index = ("a", "b"))]`
@@ -722,10 +771,13 @@ fn parse_one_struct_attr(attr: &Attribute, acc: &mut StructAttrs) -> syn::Result
 /// shapes and yield a struct-level diagnostic that points back at
 /// `index_composite` / field-level placement.
 ///
-/// The returned [`CompositeAttr`] is validated downstream by
-/// [`validate_and_lift_composites`], which already enforces the
-/// `≥ 2 fields` and "field declared on struct" invariants — both the
-/// long and short forms share the same downstream gate.
+/// The returned [`CompositeAttr`] carries `custom_name: None`; an
+/// optional sibling `name = "..."` in the same `#[obj(...)]` is merged
+/// in afterwards by [`apply_struct_index_name`]. It is then validated
+/// downstream by [`validate_and_lift_composites`], which already
+/// enforces the `≥ 2 fields` and "field declared on struct"
+/// invariants — both the long and short forms share the same
+/// downstream gate.
 fn parse_struct_index_short(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<CompositeAttr> {
     let span = meta.path.span();
     let kind = parse_index_kind(meta)?;

@@ -22,7 +22,7 @@ descriptors.
 ```rust
 #[derive(serde::Serialize, serde::Deserialize, obj::Document)]
 #[obj(collection = "orders", version = 1)]
-#[obj(index_composite(fields = ("region", "status"), name = "by_region_status"))]
+#[obj(index = ("region", "status"), name = "by_region_status")]
 struct Order {
     #[obj(index = unique)]
     email: String,
@@ -38,7 +38,8 @@ struct Order {
 |----------------------------------------------------|--------|-----------------------------------------------------|
 | `collection = "..."`                               | struct | Override the collection name (defaults to the type).|
 | `version = N`                                      | struct | Set the schema version (defaults to `1`).           |
-| `index_composite(fields = (...), name = "...")`    | struct | Composite index over ≥ 2 fields (`name` optional).  |
+| `index = (...), name = "..."`                      | struct | Composite index over ≥ 2 fields (`name` optional). **Canonical form.** |
+| `index_composite(fields = (...), name = "...")`    | struct | Same composite index, older long form — also accepted. |
 | `index`                                            | field  | Standard secondary index on the field.              |
 | `index = unique`                                   | field  | Unique secondary index on the field.                |
 | `index = each`                                     | field  | Multi-value index over each element of a `Vec` field.|
