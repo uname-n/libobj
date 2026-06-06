@@ -1204,6 +1204,14 @@ impl<'tx, T: Document> Collection<'tx, T> {
 
     /// Materialise every `(Id, T)` pair in the collection.
     ///
+    /// Use this when you need the [`Id`] alongside each document
+    /// (e.g. to re-`get`, update, or delete by id). If you only want
+    /// the documents, [`Self::values`] drops the id for you. The
+    /// `Db`-level counterpart, [`crate::Db::all`], is already
+    /// id-less — it materialises `Vec<T>` directly — so
+    /// `collection.values()` is the per-collection analogue of
+    /// `db.all()`, and `collection.all()` is the id-carrying form.
+    ///
     /// Implementation note: returns an owned `Vec` rather than a
     /// streaming iterator because the B+tree range API borrows the
     /// pager, and threading that borrow through the mutex guards
@@ -1241,6 +1249,22 @@ impl<'tx, T: Document> Collection<'tx, T> {
                 operation: "internal: lazy-mode all",
             }),
         }
+    }
+
+    /// Materialise every document in the collection, dropping the
+    /// [`Id`].
+    ///
+    /// Convenience over [`Self::all`] for the common case where the
+    /// id is not needed: `collection.values()` mirrors
+    /// [`crate::Db::all`]'s id-less `Vec<T>` shape, whereas
+    /// [`Self::all`] keeps the `(Id, T)` pair when you need to act on
+    /// documents by id.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::all`].
+    pub fn values(&self) -> Result<Vec<T>> {
+        Ok(self.all()?.into_iter().map(|(_id, doc)| doc).collect())
     }
 
     fn write_or_err(&self, op: &'static str) -> Result<&WriteRef<'tx>> {

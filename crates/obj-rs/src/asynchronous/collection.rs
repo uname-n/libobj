@@ -75,6 +75,17 @@ where
         unblock(move || db.collection::<T>(name).all()).await
     }
 
+    /// Async sibling of [`crate::Collection::values`].
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::Collection::values`].
+    pub async fn values(&self) -> Result<Vec<T>> {
+        let db = Arc::clone(&self.db);
+        let name = self.name.clone();
+        unblock(move || db.collection::<T>(name).values()).await
+    }
+
     /// Async sibling of [`crate::Collection::count_all`].
     ///
     /// # Errors
