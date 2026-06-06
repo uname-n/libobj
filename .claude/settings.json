@@ -22,7 +22,9 @@
       "mcp__pit__pit_search_issues",
       "mcp__pit__pit_update_issue",
       "mcp__pit__pit_add_comment",
-      "mcp__pit__pit_create_issue"
+      "mcp__pit__pit_create_issue",
+      "mcp__pit__pit_link_issues",
+      "mcp__pit__pit_unlink_issues"
     ]
   },
   "enabledMcpjsonServers": [
