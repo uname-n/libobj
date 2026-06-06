@@ -1265,10 +1265,33 @@ impl Db {
     /// lifetime; the borrow on `self` ends when the iterator is
     /// dropped.
     ///
-    /// Each `next` call yields `Result<(Id, T)>`. Per-doc decode
-    /// errors surface as `Some(Err(_))` rather than ending the
-    /// iteration; the caller decides whether to propagate or
-    /// continue.
+    /// # Why each item is a `Result`
+    ///
+    /// Iteration is *fallible per step*. The iterator decodes
+    /// documents lazily, one bounded batch at a time, so a
+    /// mid-iteration page read, B-tree descent, or codec decode can
+    /// fail long after construction already succeeded. Each `next`
+    /// therefore yields `Result<(Id, T)>` — a failure surfaces as
+    /// `Some(Err(_))` rather than ending the iteration, so the
+    /// caller decides whether to propagate or continue. The
+    /// canonical loop unwraps the per-step `Result` with `?` (which
+    /// is why the loop body, not the `for` binding, carries the
+    /// `(id, doc)` destructure):
+    ///
+    /// ```ignore
+    /// for step in db.iter_all::<Order>()? {
+    ///     let (id, doc) = step?; // propagate a mid-scan IO error
+    ///     // ... use `id` / `doc`
+    /// }
+    /// ```
+    ///
+    /// Contrast [`Db::all`], which is *eagerly* fallible: it drives
+    /// this iterator to exhaustion behind a single `?` and hands
+    /// back a plain `Vec<T>` with no per-element `Result` to unwrap.
+    /// Choose deliberately — prefer `all` when the collection fits
+    /// comfortably in memory and a one-shot fallible call reads
+    /// cleaner; prefer `iter_all` when peak memory must stay bounded
+    /// and you can handle (or `?`-propagate) a failure mid-scan.
     ///
     /// Peak memory does NOT scale with collection size — the
     /// iterator's internal buffer is fixed at
@@ -1351,7 +1374,10 @@ impl Db {
 /// Construction errors surface at the [`Db::iter_all`] call site;
 /// per-step errors (pager, B-tree, codec) surface as
 /// `Some(Err(_))` during iteration and do NOT terminate it — the
-/// caller decides whether to continue.
+/// caller decides whether to continue. Unwrap each step with `?`:
+/// `for step in iter { let (id, doc) = step?; }`. For the eager,
+/// single-`?` alternative that materialises a `Vec<T>` instead, see
+/// [`Db::all`].
 pub struct IterAll<'db, T> {
     /// Owns the snapshot pin for the iterator's lifetime.
     txn: ReadTxn<'db>,

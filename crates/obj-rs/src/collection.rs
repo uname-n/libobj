@@ -782,6 +782,67 @@ impl<'tx, T: Document> Collection<'tx, T> {
     /// short-circuit the second descent; that work is pinned to
     /// post-1.0.
     ///
+    /// # Why each item is a `Result`
+    ///
+    /// Iteration is *fallible per step*. The iterator walks the
+    /// index in bounded chunks and `get`s each document back
+    /// lazily, so a pager read, B-tree descent, or codec decode can
+    /// fail mid-scan — long after construction already succeeded.
+    /// Each `next` therefore yields `Result<(user_key, T)>`; the
+    /// canonical loop unwraps the per-step `Result` with `?`, which
+    /// is why the `(key, doc)` destructure lives in the loop body
+    /// rather than the `for` binding:
+    ///
+    /// ```ignore
+    /// for step in coll.iter_range("placed_at", 10u64..40)? {
+    ///     let (key, doc) = step?; // propagate a mid-scan IO error
+    ///     // ... use `key` / `doc`
+    /// }
+    /// ```
+    ///
+    /// Contrast the eager forms — [`Self::index_range`] (and the
+    /// whole-collection [`Self::all`]) materialise their matches and
+    /// surface IO failure through a single `?` at the call site
+    /// instead of once per element. Choose deliberately: the eager
+    /// call reads cleaner when the result set fits in memory; the
+    /// lazy iterator keeps peak memory bounded and lets you bail out
+    /// after the first row.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() -> obj::Result<()> {
+    /// use obj::{Db, Document};
+    /// use serde::{Deserialize, Serialize};
+    ///
+    /// #[derive(Debug, Serialize, Deserialize, obj::Document)]
+    /// #[obj(collection = "orders_iter_range_doc")]
+    /// struct Order {
+    ///     #[obj(index)]
+    ///     placed_at: u64,
+    ///     total_cents: u64,
+    /// }
+    ///
+    /// let dir = tempfile::tempdir()?;
+    /// let db = Db::open(dir.path().join("iter_range.obj"))?;
+    /// for i in 0..10u64 {
+    ///     let _ = db.insert(Order { placed_at: i, total_cents: i * 100 })?;
+    /// }
+    ///
+    /// // Stream the [3, 7) window, unwrapping each step with `?`.
+    /// let coll = db.collection::<Order>(Order::COLLECTION);
+    /// let mut total: u64 = 0;
+    /// for step in coll.iter_range("placed_at", 3u64..7)? {
+    ///     let (_key, doc) = step?;
+    ///     total = total
+    ///         .checked_add(doc.total_cents)
+    ///         .ok_or(obj::Error::InvalidArgument("overflow"))?;
+    /// }
+    /// assert_eq!(total, (300 + 400 + 500 + 600));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
     /// # Errors
     ///
     /// - [`Error::IndexNotFound`] if `index_name` is unknown / dropped.
@@ -1877,6 +1938,13 @@ enum StagedEntry<T> {
 /// to the lifetime of `Collection::iter_range`'s `&self` borrow), the
 /// index's root page-id, the dedup set for `Each` indexes, the next-
 /// chunk resumption marker, and the staged batch.
+///
+/// Items are `Result` because iteration is fallible per step — a
+/// pager read or codec decode can fail mid-scan, surfacing as
+/// `Some(Err(_))` without ending iteration. Unwrap each step with
+/// `?`: `for step in iter { let (key, doc) = step?; }`. For the
+/// eager, single-`?` alternative that materialises every match up
+/// front, see [`Collection::index_range`].
 pub struct IterIndexRange<'a, T: Document> {
     coll: &'a Collection<'a, T>,
     descriptor_kind: obj_core::IndexKind,
