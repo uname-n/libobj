@@ -27,6 +27,13 @@ use std::ops::{Bound, Range, RangeFrom, RangeFull, RangeInclusive, RangeTo, Rang
 
 use obj_core::codec::Dynamic;
 
+/// Private sealing supertrait: keeps [`DynamicRange`] closed to the impls
+/// in this module so new trait methods or impls can be added without a
+/// breaking change. Downstream crates cannot name or implement it.
+mod sealed {
+    pub trait Sealed {}
+}
+
 /// A range of index-key values, accepted by the range query APIs.
 ///
 /// Implemented for every standard range type
@@ -36,7 +43,12 @@ use obj_core::codec::Dynamic;
 /// endpoints are converted to owned [`Dynamic`] values up front; the
 /// caller-facing API then runs them through the order-preserving field
 /// encoder.
-pub trait DynamicRange {
+///
+/// This trait is **sealed**: it is not implementable by downstream crates.
+/// For any range the std sugar doesn't cover, use the general-purpose
+/// `(Bound<D>, Bound<D>)` tuple form, which can express any combination of
+/// included, excluded, and unbounded endpoints.
+pub trait DynamicRange: sealed::Sealed {
     /// Lower the range into an owned `(start, end)` pair of
     /// [`Dynamic`] bounds.
     fn into_dynamic_bounds(self) -> (Bound<Dynamic>, Bound<Dynamic>);
@@ -52,6 +64,7 @@ fn map_bound<D: Into<Dynamic>>(b: Bound<D>) -> Bound<Dynamic> {
     }
 }
 
+impl<D: Into<Dynamic>> sealed::Sealed for Range<D> {}
 impl<D: Into<Dynamic>> DynamicRange for Range<D> {
     fn into_dynamic_bounds(self) -> (Bound<Dynamic>, Bound<Dynamic>) {
         (
@@ -61,6 +74,7 @@ impl<D: Into<Dynamic>> DynamicRange for Range<D> {
     }
 }
 
+impl<D: Into<Dynamic>> sealed::Sealed for RangeInclusive<D> {}
 impl<D: Into<Dynamic>> DynamicRange for RangeInclusive<D> {
     fn into_dynamic_bounds(self) -> (Bound<Dynamic>, Bound<Dynamic>) {
         let (start, end) = self.into_inner();
@@ -68,30 +82,35 @@ impl<D: Into<Dynamic>> DynamicRange for RangeInclusive<D> {
     }
 }
 
+impl<D: Into<Dynamic>> sealed::Sealed for RangeFrom<D> {}
 impl<D: Into<Dynamic>> DynamicRange for RangeFrom<D> {
     fn into_dynamic_bounds(self) -> (Bound<Dynamic>, Bound<Dynamic>) {
         (Bound::Included(self.start.into()), Bound::Unbounded)
     }
 }
 
+impl<D: Into<Dynamic>> sealed::Sealed for RangeTo<D> {}
 impl<D: Into<Dynamic>> DynamicRange for RangeTo<D> {
     fn into_dynamic_bounds(self) -> (Bound<Dynamic>, Bound<Dynamic>) {
         (Bound::Unbounded, Bound::Excluded(self.end.into()))
     }
 }
 
+impl<D: Into<Dynamic>> sealed::Sealed for RangeToInclusive<D> {}
 impl<D: Into<Dynamic>> DynamicRange for RangeToInclusive<D> {
     fn into_dynamic_bounds(self) -> (Bound<Dynamic>, Bound<Dynamic>) {
         (Bound::Unbounded, Bound::Included(self.end.into()))
     }
 }
 
+impl sealed::Sealed for RangeFull {}
 impl DynamicRange for RangeFull {
     fn into_dynamic_bounds(self) -> (Bound<Dynamic>, Bound<Dynamic>) {
         (Bound::Unbounded, Bound::Unbounded)
     }
 }
 
+impl<D: Into<Dynamic>> sealed::Sealed for (Bound<D>, Bound<D>) {}
 impl<D: Into<Dynamic>> DynamicRange for (Bound<D>, Bound<D>) {
     fn into_dynamic_bounds(self) -> (Bound<Dynamic>, Bound<Dynamic>) {
         (map_bound(self.0), map_bound(self.1))
