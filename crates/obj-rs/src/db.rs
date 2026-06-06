@@ -811,8 +811,9 @@ impl Db {
     /// // get returns Option<T>.
     /// let _maybe: Option<Order> = db.get::<Order>(id)?;
     ///
-    /// // update applies a closure in place.
-    /// db.update::<Order, _>(id, |o| {
+    /// // update applies a closure in place. Annotate the closure
+    /// // parameter (`|o: &mut Order|`) so `T` is inferred — no turbofish.
+    /// db.update(id, |o: &mut Order| {
     ///     o.status = "shipped".to_owned();
     /// })?;
     ///
@@ -852,6 +853,41 @@ impl Db {
     }
 
     /// Update the document at `id` via the closure.
+    ///
+    /// # Choosing a call form
+    ///
+    /// `T` appears only behind the closure's `&mut T` parameter, so
+    /// the compiler has nothing in the value arguments to infer it
+    /// from. The low-friction form is to **annotate the closure
+    /// parameter** — `db.update(id, |o: &mut Order| …)` — and let
+    /// inference flow from there. Prefer this. The turbofish
+    /// `db.update::<Order, _>(id, …)` works too but is noisier: the
+    /// trailing `_` is the closure type you would rather not spell.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() -> obj::Result<()> {
+    /// use obj::Db;
+    /// use serde::{Deserialize, Serialize};
+    ///
+    /// #[derive(Debug, Clone, Serialize, Deserialize, obj::Document)]
+    /// struct Order { total_cents: u64, status: String }
+    ///
+    /// let dir = tempfile::tempdir()?;
+    /// let db = Db::open(dir.path().join("update.obj"))?;
+    /// let id = db.insert(Order { total_cents: 100, status: "pending".to_owned() })?;
+    ///
+    /// // Recommended: annotate the closure parameter; no turbofish.
+    /// db.update(id, |o: &mut Order| o.status = "shipped".to_owned())?;
+    ///
+    /// let after: Order = db
+    ///     .get::<Order>(id)?
+    ///     .ok_or(obj::Error::InvalidArgument("just updated"))?;
+    /// assert_eq!(after.status, "shipped");
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// # Errors
     ///
