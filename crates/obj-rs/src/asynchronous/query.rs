@@ -212,6 +212,21 @@ where
         .await
     }
 
+    /// Return the first matching document, or `None` when nothing
+    /// matches. Async mirror of [`crate::Query::first`].
+    ///
+    /// Forces an internal `.limit(1)` and reuses the async
+    /// [`AsyncQuery::fetch`] path — no second decode route. Filters,
+    /// `index_range`, and `sort_by` already configured are honoured;
+    /// with a sort key set "first" is the smallest by the sort key.
+    ///
+    /// # Errors
+    ///
+    /// As [`AsyncQuery::fetch`].
+    pub async fn first(self) -> Result<Option<T>> {
+        Ok(self.limit(1).fetch().await?.into_iter().next())
+    }
+
     /// Count matching documents. See [`crate::Query::count`].
     ///
     /// Takes `self` by value rather than by reference because the

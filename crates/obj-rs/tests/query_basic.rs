@@ -551,6 +551,59 @@ fn query_count_empty_collection_is_collection_not_found() {
 }
 
 #[test]
+fn query_first_returns_some_first_in_source_order() {
+    let (db, _dir) = fresh_db();
+    seed_orders(&db, 10);
+    let first: Option<Order> = db.query::<Order>().first().expect("first");
+    // No sort: source order is primary Id, i.e. insertion order, so
+    // the first inserted (customer_id 0) wins.
+    assert_eq!(first.map(|o| o.customer_id), Some(0));
+}
+
+#[test]
+fn query_first_with_filter_returns_first_match() {
+    let (db, _dir) = fresh_db();
+    seed_orders(&db, 10);
+    let first: Option<Order> = db
+        .query::<Order>()
+        .filter(|o| o.status == "shipped")
+        .first()
+        .expect("first");
+    // Odd-indexed docs are "shipped"; the smallest such id is 1.
+    assert_eq!(first.map(|o| o.customer_id), Some(1));
+}
+
+#[test]
+fn query_first_on_empty_result_is_none() {
+    let (db, _dir) = fresh_db();
+    seed_orders(&db, 5);
+    let none: Option<Order> = db
+        .query::<Order>()
+        .filter(|o| o.status == "archived")
+        .first()
+        .expect("first");
+    assert!(none.is_none(), "no doc has status 'archived'");
+}
+
+#[test]
+fn query_first_respects_sort_order() {
+    let (db, _dir) = fresh_db();
+    // placed_at is the REVERSE of insertion order, so source order and
+    // sort order disagree — the sort must decide which row is "first".
+    seed_reversed(&db, 100);
+    let first: Option<Order> = db
+        .query::<Order>()
+        .sort_by(|o| Dynamic::U64(o.placed_at))
+        .first()
+        .expect("first");
+    assert_eq!(
+        first.map(|o| o.placed_at),
+        Some(0),
+        "ascending sort_by makes the smallest placed_at first",
+    );
+}
+
+#[test]
 fn iter_all_yields_docs_one_at_a_time() {
     let (db, _dir) = fresh_db();
     let total: u64 = 1_000;
