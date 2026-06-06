@@ -508,36 +508,98 @@ pub use serde::{Deserialize, Serialize};
 ///
 /// # Schema evolution
 ///
-/// Schema evolution is `(version bump) + (migrate)`. The historical
-/// *wire shape* needed to walk old bytes is **not** something you keep
-/// alive in code — it is recovered from the database file itself.
+/// Evolving a stored type is `(version bump) + (migrate)`: bump
+/// `#[obj(version = N)]` on every breaking change, and the engine
+/// migrates older records to the current shape lazily, on read. The
+/// historical *wire shape* needed to walk old bytes is **not** kept
+/// alive in code — it is recovered from the database file itself (see
+/// *How the old shape is recovered*, below). For the overwhelmingly
+/// common case — **adding fields** — you do not write the `migrate`
+/// body at all; the derive writes it.
 ///
-/// **How the shape gets onto disk.** Every typed write persists the
-/// running version's schema into a reserved row of the catalog B+tree,
-/// in the same WAL transaction as the document. The disk catalog holds
-/// a schema row for version `K` **iff** some process running version-`K`
-/// code wrote a version-`K` document to this file. At read time the
-/// decoder sources the old shape from that row, not from a live old
-/// class.
+/// ## Additive changes: `#[obj(auto_migrate)]` (start here)
 ///
-/// **Load-bearing invariant.** *A document stamped version `N` is
-/// decodable iff a `(collection, N)` schema row exists on disk.* The
-/// write path guarantees the row commits before (or with) the first
-/// version-`N` document, so for any file written by this engine the
-/// invariant always holds. There is no compiled-in read fallback.
+/// When a version bump **only adds fields** (no removals, renames, or
+/// type changes), add `#[obj(auto_migrate)]` to the struct and you are
+/// done. The derive generates `migrate`: every current field is read
+/// from the older record's `Dynamic` map by name — pre-existing fields
+/// carry over (deserialised into the current field type) and fields
+/// added in this version backfill with `Default::default()`, or with a
+/// per-field `#[obj(default = <expr>)]` override.
 ///
-/// Old records read through the new type are migrated in memory; their
-/// on-disk bytes are not rewritten until the next `update` / `upsert`.
-/// The collection therefore scales to billions of docs without a
-/// stop-the-world rebuild on every schema change.
+/// ```
+/// # fn main() -> obj::Result<()> {
+/// use obj::{Db, Document};
+/// use serde::{Deserialize, Serialize};
 ///
-/// **Authoring `migrate`.** A type that needs a real migration
-/// hand-writes its [`Document`] impl and **overrides
-/// [`Document::migrate`]**. Do *not* write `impl Migrate for T` — the
-/// [`Migrate`](obj_core::codec::Migrate) trait has a blanket impl over
-/// every `Document`, so a direct impl conflicts and fails to compile.
-/// Read the old fields out of the `Dynamic` map per field; deserializing
-/// a `Dynamic::Map` as a struct misreads the map length as field 0.
+/// let dir = tempfile::tempdir()?;
+/// let path = dir.path().join("auto_evo.obj");
+///
+/// // v1: a plain derived Document.
+/// let id = {
+///     #[derive(Debug, Serialize, Deserialize, Document)]
+///     #[obj(version = 1, collection = "auto_customers")]
+///     struct Customer { name: String, email: String }
+///     let db = Db::open(&path)?;
+///     db.insert(Customer { name: "Ada".into(), email: "ada@x.io".into() })?
+/// };
+///
+/// // v2: adds `tier`; the derive generates `migrate`. No hand-impl.
+/// #[derive(Debug, Serialize, Deserialize, Document)]
+/// #[obj(version = 2, collection = "auto_customers", auto_migrate)]
+/// struct Customer {
+///     name: String,
+///     email: String,
+///     // Custom backfill for the new field (defaults to "" otherwise).
+///     #[obj(default = "standard".to_owned())]
+///     tier: String,
+/// }
+///
+/// let db = Db::open(&path)?;
+/// let back: Customer = db.get(id)?.ok_or(obj::Error::InvalidArgument("missing"))?;
+/// assert_eq!(back.name, "Ada");            // carried over
+/// assert_eq!(back.tier, "standard");       // backfilled
+/// # Ok(())
+/// # }
+/// ```
+///
+/// This is the recommended path for additive evolution. `Option<T>`
+/// fields, enum fields, and derived indexes all carry through
+/// unchanged. The pattern is exercised end-to-end by the
+/// `derive_auto_migrate.rs` integration test (additive fields, custom
+/// `default`, `Option` / enum carry-over, index composition, and the
+/// rename boundary called out below).
+///
+/// ## When you must hand-write `migrate`
+///
+/// `auto_migrate` handles the pure-additive case only. Fall back to a
+/// hand-written [`Document::migrate`] whenever the change is **not**
+/// purely additive:
+///
+/// - a field is **removed** (especially one with side effects),
+/// - a field is **renamed** — the derive cannot know the new name is
+///   "the same" field, so it treats it as fresh and defaults it (the
+///   `rename_boundary` case in `derive_auto_migrate.rs`),
+/// - a field **changes type**,
+/// - the backfill must **vary by `from_version`**.
+///
+/// The generated body is documented at
+/// `crates/obj-derive/src/lib.rs:305-321`: it ignores `from_version`
+/// and reads each current field by name, so anything version-dependent
+/// or non-additive needs the manual path. `auto_migrate` and a
+/// hand-written `migrate` are mutually exclusive — both define the same
+/// method, so declaring both is a compile error. A field whose type is
+/// not `Default` (and carries no `#[obj(default = <expr>)]`) makes the
+/// generated body fail to compile — a loud, intentional signal that the
+/// change is not purely additive.
+///
+/// To migrate by hand, hand-write the type's [`Document`] impl and
+/// **override [`Document::migrate`]**. Do *not* write `impl Migrate for
+/// T` — the [`Migrate`](obj_core::codec::Migrate) trait has a blanket
+/// impl over every `Document`, so a direct impl conflicts and fails to
+/// compile. Read the old fields out of the `Dynamic` map per field;
+/// deserializing a `Dynamic::Map` as a struct misreads the map length
+/// as field 0.
 ///
 /// ```
 /// # fn main() -> obj::Result<()> {
@@ -633,65 +695,141 @@ pub use serde::{Deserialize, Serialize};
 ///    the migration's responsibility — there is no implicit
 ///    default.
 ///
-/// ## Pure-additive shortcut: `#[obj(auto_migrate)]`
+/// ## Chained migrations (`v1 → v2 → v3`)
 ///
-/// When a version bump **only adds fields** (no removals, renames, or
-/// type changes), you do not need to hand-write `migrate` at all. Add
-/// `#[obj(auto_migrate)]` to the struct and the derive generates the
-/// `migrate` body for you: every current field is read from the older
-/// record's `Dynamic` map by name; pre-existing fields carry over and
-/// fields added in this version backfill with `Default::default()`.
+/// Once a type has several historical versions, a `migrate` that
+/// rebuilds each intermediate shape inline grows unwieldy. The
+/// recommended pattern is a small **struct per version** plus a `From`
+/// impl for each one-step hop. `migrate` reconstructs the record at its
+/// own version, then walks the `From` chain up to the current shape —
+/// each upgrade step is written once and composes:
 ///
 /// ```
 /// # fn main() -> obj::Result<()> {
-/// use obj::{Db, Document};
+/// use obj::{Db, Document, Schema};
+/// use obj_core::codec::{Dynamic, DynamicSchema};
 /// use serde::{Deserialize, Serialize};
 ///
 /// let dir = tempfile::tempdir()?;
-/// let path = dir.path().join("auto_evo.obj");
+/// let path = dir.path().join("chain.obj");
 ///
-/// // v1: a plain derived Document.
-/// let id = {
+/// // Two records written by two different historical versions of the
+/// // same collection; each insert persists its own schema row.
+/// let v1_id = {
 ///     #[derive(Debug, Serialize, Deserialize, Document)]
-///     #[obj(version = 1, collection = "auto_customers")]
-///     struct Customer { name: String, email: String }
+///     #[obj(version = 1, collection = "users_chain")]
+///     struct User { name: String }
 ///     let db = Db::open(&path)?;
-///     db.insert(Customer { name: "Ada".into(), email: "ada@x.io".into() })?
+///     db.insert(User { name: "Ada".to_owned() })?
+/// };
+/// let v2_id = {
+///     #[derive(Debug, Serialize, Deserialize, Document)]
+///     #[obj(version = 2, collection = "users_chain")]
+///     struct User { name: String, email: String }
+///     let db = Db::open(&path)?;
+///     db.insert(User { name: "Grace".to_owned(), email: "grace@x.io".to_owned() })?
 /// };
 ///
-/// // v2: adds `tier`; the derive generates `migrate`. No hand-impl.
-/// #[derive(Debug, Serialize, Deserialize, Document)]
-/// #[obj(version = 2, collection = "auto_customers", auto_migrate)]
-/// struct Customer {
-///     name: String,
-///     email: String,
-///     // Custom backfill for the new field (defaults to "" otherwise).
-///     #[obj(default = "standard".to_owned())]
-///     tier: String,
+/// // One lightweight struct per historical shape; only the current
+/// // version is the live `Document`.
+/// #[derive(Debug, Serialize, Deserialize)]
+/// struct UserV1 { name: String }
+/// #[derive(Debug, Serialize, Deserialize)]
+/// struct UserV2 { name: String, email: String }
+/// #[derive(Debug, Serialize, Deserialize)]
+/// struct User { name: String, email: String, verified: bool } // v3, current
+///
+/// // One `From` per single-version hop. Each is small and testable.
+/// impl From<UserV1> for UserV2 {
+///     fn from(v: UserV1) -> Self {
+///         UserV2 { name: v.name, email: "unknown@example.com".to_owned() }
+///     }
+/// }
+/// impl From<UserV2> for User {
+///     fn from(v: UserV2) -> Self {
+///         User { name: v.name, email: v.email, verified: false }
+///     }
 /// }
 ///
+/// impl Schema for User {
+///     fn schema() -> DynamicSchema {
+///         DynamicSchema::map([
+///             ("name", DynamicSchema::String),
+///             ("email", DynamicSchema::String),
+///             ("verified", DynamicSchema::Bool),
+///         ])
+///     }
+/// }
+///
+/// impl Document for User {
+///     const COLLECTION: &'static str = "users_chain";
+///     const VERSION: u32 = 3;
+///
+///     fn migrate(dynamic: Dynamic, from_version: u32) -> obj::Result<Self> {
+///         // Rebuild the record at its own version, then walk the
+///         // `From` chain up to the current shape.
+///         Ok(match from_version {
+///             1 => {
+///                 let v1 = UserV1 { name: dynamic.get_str("name")?.to_owned() };
+///                 let v2: UserV2 = v1.into();
+///                 v2.into()
+///             }
+///             2 => {
+///                 let v2 = UserV2 {
+///                     name: dynamic.get_str("name")?.to_owned(),
+///                     email: dynamic.get_str("email")?.to_owned(),
+///                 };
+///                 v2.into()
+///             }
+///             _ => {
+///                 return Err(obj::Error::SchemaMigrationNotImplemented {
+///                     collection: Self::COLLECTION,
+///                     from_version,
+///                     to_version: Self::VERSION,
+///                 })
+///             }
+///         })
+///     }
+/// }
+///
+/// // Reopen as v3: the v1 record runs v1→v2→v3, the v2 record runs v2→v3.
 /// let db = Db::open(&path)?;
-/// let back: Customer = db.get(id)?.ok_or(obj::Error::InvalidArgument("missing"))?;
-/// assert_eq!(back.name, "Ada");            // carried over
-/// assert_eq!(back.tier, "standard");       // backfilled
+/// let from_v1: User = db.get(v1_id)?.ok_or(obj::Error::InvalidArgument("v1"))?;
+/// let from_v2: User = db.get(v2_id)?.ok_or(obj::Error::InvalidArgument("v2"))?;
+/// assert_eq!(from_v1.email, "unknown@example.com"); // backfilled in v1→v2
+/// assert!(!from_v1.verified);                        // backfilled in v2→v3
+/// assert_eq!(from_v2.email, "grace@x.io");           // carried through v2→v3
 /// # Ok(())
 /// # }
 /// ```
 ///
-/// `auto_migrate` and a hand-written `migrate` are mutually exclusive
-/// (both define the same method). Use `auto_migrate` for additive
-/// changes; hand-write the full `impl Document` for a removal with side
-/// effects, a rename, a type change, or any backfill that varies by
-/// `from_version`. A field whose type is not `Default` (and carries no
-/// `#[obj(default = <expr>)]`) makes the generated body fail to compile
-/// — a loud, intentional signal that the change is not purely additive.
+/// ## How the old shape is recovered
+///
+/// **How the shape gets onto disk.** Every typed write persists the
+/// running version's schema into a reserved row of the catalog B+tree,
+/// in the same WAL transaction as the document. The disk catalog holds
+/// a schema row for version `K` **iff** some process running version-`K`
+/// code wrote a version-`K` document to this file. At read time the
+/// decoder sources the old shape from that row, not from a live old
+/// class.
+///
+/// **Load-bearing invariant.** *A document stamped version `N` is
+/// decodable iff a `(collection, N)` schema row exists on disk.* The
+/// write path guarantees the row commits before (or with) the first
+/// version-`N` document, so for any file written by this engine the
+/// invariant always holds. There is no compiled-in read fallback.
+///
+/// Old records read through the new type are migrated in memory; their
+/// on-disk bytes are not rewritten until the next `update` / `upsert`.
+/// The collection therefore scales to billions of docs without a
+/// stop-the-world rebuild on every schema change.
 ///
 /// A stored record whose `type_version` is newer than
 /// `Self::VERSION` surfaces [`Error::SchemaVersionFromFuture`]; an
 /// older `type_version` with no schema row on disk surfaces
-/// [`Error::SchemaNotRegistered`]. For multi-version chains,
-/// tombstoned fields, and enum-variant migration recipes, see the
-/// integration tests `disk_schema_migration.rs`, `schema_evolution.rs`,
+/// [`Error::SchemaNotRegistered`]. For tombstoned fields and
+/// enum-variant migration recipes, see the integration tests
+/// `disk_schema_migration.rs`, `schema_evolution.rs`,
 /// `tombstone_migration.rs`, `enum_migration.rs`, and
 /// `lazy_migration.rs`.
 pub use obj_derive::Document;

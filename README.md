@@ -43,6 +43,35 @@ Collection name and schema version default to the type name and `1`; override
 with `#[obj(collection = "...", version = N)]`. See the crate docs for queries,
 indexes, transactions, and migrations.
 
+## Schema migrations
+
+Evolve a stored type by bumping its version; older records migrate to the
+current shape lazily, on read. For the common case — **adding fields** — you
+don't write the migration at all: add `#[obj(auto_migrate)]` and the derive
+generates it. Pre-existing fields carry over and new fields backfill with
+their `Default`, or with a per-field `#[obj(default = ...)]` override.
+
+```rust
+use serde::{Deserialize, Serialize};
+
+// v2 of a type first stored at v1: `tier` is new. Existing records carry
+// `name`/`email` over and backfill `tier` from `#[obj(default = ...)]`.
+#[derive(Debug, Serialize, Deserialize, obj::Document)]
+#[obj(version = 2, collection = "customers", auto_migrate)]
+struct Customer {
+    name: String,
+    email: String,
+    #[obj(default = "standard".to_owned())]
+    tier: String,
+}
+```
+
+`auto_migrate` covers pure-additive changes only. Field removals, renames,
+type changes, and version-dependent backfills need a hand-written
+`Document::migrate` — including the recommended `From`-per-version pattern for
+chained `v1 → v2 → v3` upgrades. See the `obj-rs` crate docs ("Schema
+evolution") for both paths.
+
 ## Performance
 
 The defaults favour durability and a small memory footprint over raw
