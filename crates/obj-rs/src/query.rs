@@ -64,17 +64,19 @@ enum Source {
     /// Full primary-tree scan via [`crate::Collection::all`].
     Full,
     /// Walk the named index's B-tree slice via
-    /// [`crate::Collection::index_range`]. Bounds are stored as
-    /// already-encoded byte ranges — the builder runs
-    /// `encode_field` at the boundary so the borrow-checker does not
-    /// need to track `Dynamic` across the read txn.
+    /// [`crate::Collection::index_range`]. Bounds are stored as the
+    /// requested `Dynamic` values, unencoded — the terminal
+    /// `.fetch()` / `.count()` call runs `encode_field` so that the
+    /// fluent builder step ([`Query::index_range`]) can stay
+    /// infallible and any encode error surfaces from the terminal
+    /// `Result` rather than mid-chain.
     IndexRange {
         /// Index name.
         name: String,
-        /// Encoded lower bound.
-        start: Bound<Vec<u8>>,
-        /// Encoded upper bound.
-        end: Bound<Vec<u8>>,
+        /// Requested lower bound (encoded at fetch/count time).
+        start: Bound<Dynamic>,
+        /// Requested upper bound (encoded at fetch/count time).
+        end: Bound<Dynamic>,
     },
 }
 
@@ -155,9 +157,13 @@ where
     /// [`Dynamic`] (`u64`, `i64`, `&str`, …) — see
     /// [`DynamicRange`](crate::DynamicRange) —
     /// so a bare `40u64..60` works without wrapping each end in
-    /// `Dynamic::U64(..)`. The builder encodes them through
-    /// `obj_core::index::encode_field` at call time so the actual
-    /// range arithmetic sees byte-ordered keys.
+    /// `Dynamic::U64(..)`. The bounds are stored unencoded; the
+    /// terminal `.fetch()` / `.count()` call runs them through
+    /// `obj_core::index::encode_field` so the actual range arithmetic
+    /// sees byte-ordered keys. This keeps the builder step infallible
+    /// — it returns `Self`, so the fluent chain needs no mid-chain
+    /// `?`. An unencodable bound (see *Deferred errors*) surfaces from
+    /// the terminal `Result` instead.
     ///
     /// Order is by the index key bytes, not by primary `Id`. The
     /// scan is bounded to the slice of the index B-tree the range
@@ -166,7 +172,7 @@ where
     /// # Examples
     ///
     /// Range query on an indexed `u64` field — scalar bounds, no
-    /// `Dynamic::` wrapping:
+    /// `Dynamic::` wrapping, and no mid-chain `?`:
     ///
     /// ```
     /// # fn main() -> obj::Result<()> {
@@ -187,31 +193,34 @@ where
     /// }
     /// let recent: Vec<Order> = db
     ///     .query::<Order>()
-    ///     .index_range("placed_at", 30_000u64..60_000)?
+    ///     .index_range("placed_at", 30_000u64..60_000)
     ///     .fetch()?;
     /// assert_eq!(recent.len(), 30);
     /// # Ok(())
     /// # }
     /// ```
     ///
-    /// # Errors
+    /// # Deferred errors
     ///
-    /// - [`obj_core::Error::Codec`] if a `Dynamic::String` bound
-    ///   carries an embedded NUL byte (the order-preserving encoder
-    ///   rejects those — see `obj_core::index::encode_field`).
-    pub fn index_range<R>(mut self, name: &str, range: R) -> Result<Self>
+    /// `index_range` itself is infallible — it only stores the
+    /// requested bounds. The order-preserving encoder runs during
+    /// [`Query::fetch`] / [`Query::count`]; a bound that cannot be
+    /// encoded (e.g. a `Dynamic::String` carrying an embedded NUL
+    /// byte, which `obj_core::index::encode_field` rejects) surfaces
+    /// as [`obj_core::Error::InvalidArgument`] from those terminal
+    /// calls.
+    #[must_use]
+    pub fn index_range<R>(mut self, name: &str, range: R) -> Self
     where
         R: crate::range::DynamicRange,
     {
         let (start, end) = range.into_dynamic_bounds();
-        let start = encode_bound(start.as_ref())?;
-        let end = encode_bound(end.as_ref())?;
         self.source = Source::IndexRange {
             name: name.to_owned(),
             start,
             end,
         };
-        Ok(self)
+        self
     }
 
     /// Sort the result by `key`'s output in ascending key order.
@@ -572,7 +581,9 @@ where
             }
         }
         Source::IndexRange { name, start, end } => {
-            let iter = coll.index_range_encoded(name, clone_bound(start), clone_bound(end))?;
+            let start = encode_bound(start.as_ref())?;
+            let end = encode_bound(end.as_ref())?;
+            let iter = coll.index_range_encoded(name, start, end)?;
             for step in iter {
                 let (_key, doc) = step?;
                 if !f(doc)? {
@@ -601,10 +612,12 @@ where
         Source::Full => coll.count_all(),
         Source::IndexRange { name, start, end } => {
             let kind = coll.index_kind(name)?;
+            let start = encode_bound(start.as_ref())?;
+            let end = encode_bound(end.as_ref())?;
             if kind == obj_core::IndexKind::Each {
-                coll.count_distinct_ids_in_range_encoded(name, clone_bound(start), clone_bound(end))
+                coll.count_distinct_ids_in_range_encoded(name, start, end)
             } else {
-                coll.count_index_range_encoded(name, clone_bound(start), clone_bound(end))
+                coll.count_index_range_encoded(name, start, end)
             }
         }
     }
@@ -633,7 +646,10 @@ where
 }
 
 /// Encode a `Bound<Dynamic>` into a `Bound<Vec<u8>>` using the
-/// order-preserving field encoder. Used by [`Query::index_range`].
+/// order-preserving field encoder. Run at terminal time
+/// (`fetch` / `count`) so [`Query::index_range`] can stay infallible;
+/// an unencodable bound surfaces here as the terminal `Result`'s
+/// error.
 fn encode_bound(b: Bound<&Dynamic>) -> Result<Bound<Vec<u8>>> {
     match b {
         Bound::Included(v) => Ok(Bound::Included(
@@ -643,16 +659,5 @@ fn encode_bound(b: Bound<&Dynamic>) -> Result<Bound<Vec<u8>>> {
             obj_core::index::encode_field(v)?.into_bytes(),
         )),
         Bound::Unbounded => Ok(Bound::Unbounded),
-    }
-}
-
-/// Clone a borrowed `Bound<Vec<u8>>` into an owned `Bound<Vec<u8>>`.
-/// Used by [`fetch_index_range`] to hand the bounds to the
-/// `Collection::index_range` API (which takes ownership).
-fn clone_bound(b: &Bound<Vec<u8>>) -> Bound<Vec<u8>> {
-    match b {
-        Bound::Included(v) => Bound::Included(v.clone()),
-        Bound::Excluded(v) => Bound::Excluded(v.clone()),
-        Bound::Unbounded => Bound::Unbounded,
     }
 }

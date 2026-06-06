@@ -162,9 +162,7 @@ fn query_index_range_walks_index_slice() {
                 Bound::Included(Dynamic::U64(40)),
                 Bound::Excluded(Dynamic::U64(60)),
             ),
-        )
-        .expect("index_range")
-        .fetch()
+        )        .fetch()
         .expect("index_range fetch");
     assert_eq!(mid.len(), 20);
     assert!(mid.iter().all(|o| (40..60).contains(&o.placed_at)));
@@ -189,14 +187,12 @@ fn query_index_range_scalar_matches_dynamic_wrapped() {
                 Bound::Excluded(Dynamic::U64(60)),
             ),
         )
-        .expect("wrapped index_range")
         .fetch()
         .expect("wrapped fetch");
 
     let scalar: Vec<Order> = db
         .query::<Order>()
         .index_range("placed_at", 40u64..60)
-        .expect("scalar index_range")
         .fetch()
         .expect("scalar fetch");
 
@@ -207,7 +203,6 @@ fn query_index_range_scalar_matches_dynamic_wrapped() {
     let inclusive: Vec<Order> = db
         .query::<Order>()
         .index_range("placed_at", 40u64..=60)
-        .expect("inclusive index_range")
         .fetch()
         .expect("inclusive fetch");
     assert_eq!(inclusive.len(), 21);
@@ -234,9 +229,7 @@ fn query_index_range_empty_window_is_empty() {
                 Bound::Included(Dynamic::U64(1_000)),
                 Bound::Excluded(Dynamic::U64(2_000)),
             ),
-        )
-        .expect("index_range")
-        .fetch()
+        )        .fetch()
         .expect("index_range fetch");
     assert!(empty.is_empty());
 }
@@ -254,11 +247,88 @@ fn query_index_range_with_filter() {
                 Bound::Excluded(Dynamic::U64(30)),
             ),
         )
-        .expect("index_range")
         .filter(|o| o.status == "pending")
         .fetch()
         .expect("fetch");
     assert_eq!(hits.len(), 10);
+}
+
+/// `Query::index_range` returns `Self`, not `Result<Self>`, so the
+/// fluent chain needs no mid-chain `?` / `.expect(...)` — it composes
+/// with `.filter(...)` and `.fetch()` exactly like every other builder
+/// step. This is the ergonomic win issue #7 delivers.
+#[test]
+fn index_range_is_infallible_and_chains_fluently() {
+    let (db, _dir) = fresh_db();
+    seed_orders(&db, 100);
+    let mid: Vec<Order> = db
+        .query::<Order>()
+        .index_range("placed_at", 40u64..60)
+        .filter(|o| o.placed_at % 2 == 0)
+        .fetch()
+        .expect("fetch");
+    assert_eq!(mid.len(), 10, "even placed_at in [40, 60) is 40,42,..,58");
+}
+
+/// Deferred-error path: an unencodable bound (a `Dynamic::String`
+/// carrying an embedded NUL, which the order-preserving encoder
+/// rejects) does NOT fail at the infallible `.index_range(...)` step.
+/// The encode runs at terminal time, so the error surfaces from
+/// `.fetch()`.
+#[test]
+fn index_range_unencodable_bound_surfaces_err_from_fetch() {
+    let (db, _dir) = fresh_db();
+    for _ in 0..3 {
+        let _ = db
+            .insert(Ticket {
+                status: "urgent".to_owned(),
+            })
+            .expect("insert");
+    }
+    // The builder step itself succeeds — no `?` here.
+    let q = db.query::<Ticket>().index_range(
+        "by_status",
+        (
+            Bound::Included(Dynamic::String("has\0nul".to_owned())),
+            Bound::Unbounded,
+        ),
+    );
+    let err = q
+        .fetch()
+        .expect_err("embedded NUL must be rejected at fetch time");
+    assert!(
+        matches!(err, obj::Error::InvalidArgument(_)),
+        "expected InvalidArgument from deferred encode, got {err:?}",
+    );
+}
+
+/// Same deferred-error contract for the `.count()` terminal: the
+/// encode error fires from `count()`, not from `index_range`.
+#[test]
+fn index_range_unencodable_bound_surfaces_err_from_count() {
+    let (db, _dir) = fresh_db();
+    for _ in 0..3 {
+        let _ = db
+            .insert(Ticket {
+                status: "urgent".to_owned(),
+            })
+            .expect("insert");
+    }
+    let err = db
+        .query::<Ticket>()
+        .index_range(
+            "by_status",
+            (
+                Bound::Included(Dynamic::String("has\0nul".to_owned())),
+                Bound::Unbounded,
+            ),
+        )
+        .count()
+        .expect_err("embedded NUL must be rejected at count time");
+    assert!(
+        matches!(err, obj::Error::InvalidArgument(_)),
+        "expected InvalidArgument from deferred encode, got {err:?}",
+    );
 }
 
 /// Seed docs whose `placed_at` is the REVERSE of insertion order so
@@ -441,9 +511,7 @@ fn query_count_index_range_fast_path() {
                 Bound::Included(Dynamic::U64(30)),
                 Bound::Excluded(Dynamic::U64(70)),
             ),
-        )
-        .expect("index_range")
-        .count()
+        )        .count()
         .expect("count");
     assert_eq!(n, 40, "[30, 70) covers 40 docs");
 }
@@ -662,9 +730,7 @@ fn query_count_uses_distinct_path_for_each_index() {
         .index_range(
             "by_tag",
             Dynamic::from("urgent".to_owned())..=Dynamic::from("urgent".to_owned()),
-        )
-        .expect("index_range")
-        .count()
+        )        .count()
         .expect("count");
     assert_eq!(
         n, 3,
@@ -676,9 +742,7 @@ fn query_count_uses_distinct_path_for_each_index() {
         .index_range(
             "by_tag",
             Dynamic::from("urgent".to_owned())..=Dynamic::from("urgent".to_owned()),
-        )
-        .expect("index_range")
-        .fetch()
+        )        .fetch()
         .expect("fetch");
     assert_eq!(docs.len() as u64, n);
 }
@@ -872,9 +936,7 @@ fn standard_index_inclusive_equality_matches_all_entries() {
         .index_range(
             "by_status",
             Dynamic::from("urgent".to_owned())..=Dynamic::from("urgent".to_owned()),
-        )
-        .expect("index_range")
-        .fetch()
+        )        .fetch()
         .expect("fetch");
     assert_eq!(hits.len(), 3, "all 3 'urgent' docs must match");
     assert!(hits.iter().all(|t| t.status == "urgent"));
@@ -898,9 +960,7 @@ fn each_index_inclusive_equality_matches_all_entries() {
         .index_range(
             "by_tag",
             Dynamic::from("urgent".to_owned())..=Dynamic::from("urgent".to_owned()),
-        )
-        .expect("index_range")
-        .fetch()
+        )        .fetch()
         .expect("fetch");
     assert_eq!(hits.len(), 2, "both 'urgent'-tagged docs must match");
 }
@@ -930,9 +990,7 @@ fn excluded_lower_skips_user_key_entries_inclusive_upper_matches() {
                 Bound::Excluded(Dynamic::from("a".to_owned())),
                 Bound::Included(Dynamic::from("b".to_owned())),
             ),
-        )
-        .expect("index_range")
-        .fetch()
+        )        .fetch()
         .expect("fetch");
     assert_eq!(hits.len(), 3, "only the 3 'b' docs match");
     assert!(hits.iter().all(|t| t.status == "b"));
@@ -970,9 +1028,7 @@ fn unique_inclusive_equality_still_matches_single_entry() {
             "by_email",
             Dynamic::from("ada@example.com".to_owned())
                 ..=Dynamic::from("ada@example.com".to_owned()),
-        )
-        .expect("index_range")
-        .fetch()
+        )        .fetch()
         .expect("fetch");
     assert_eq!(hits.len(), 1, "Unique single-key inclusive range matches");
     assert_eq!(hits[0].email, "ada@example.com");

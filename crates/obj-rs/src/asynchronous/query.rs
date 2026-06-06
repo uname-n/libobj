@@ -120,13 +120,13 @@ where
     /// Switch the source to a named index's range. See
     /// [`crate::Query::index_range`].
     ///
-    /// # Errors
+    /// # Deferred errors
     ///
-    /// As [`crate::Query::index_range`] — note that the underlying
-    /// encoder fires at `fetch` / `count` time rather than here,
-    /// because the async builder stores the structured `Dynamic`
-    /// bounds and forwards them onto the blocking `Query` inside the
-    /// blocking task.
+    /// Infallible — like the blocking [`crate::Query::index_range`],
+    /// the order-preserving encoder fires at `fetch` / `count` time,
+    /// not here: the builder stores the structured `Dynamic` bounds
+    /// and forwards them onto the blocking `Query` inside the blocking
+    /// task. An unencodable bound surfaces from `fetch` / `count`.
     #[must_use]
     pub fn index_range<R>(mut self, name: &str, range: R) -> Self
     where
@@ -194,7 +194,7 @@ where
                 limit,
                 sort_key,
                 sort_buffer_limit,
-            )?;
+            );
             q.fetch()
         })
         .await
@@ -228,7 +228,7 @@ where
                 limit,
                 sort_key,
                 sort_buffer_limit,
-            )?;
+            );
             q.count()
         })
         .await
@@ -246,7 +246,7 @@ fn build_blocking_query<T>(
     limit: Option<usize>,
     sort_key: Option<SortKey<T>>,
     sort_buffer_limit: Option<usize>,
-) -> Result<crate::Query<'_, T>>
+) -> crate::Query<'_, T>
 where
     T: Document + Send + 'static,
 {
@@ -254,7 +254,7 @@ where
     match source {
         AsyncSource::Full => {}
         AsyncSource::IndexRange { name, start, end } => {
-            q = q.index_range(&name, (start, end))?;
+            q = q.index_range(&name, (start, end));
         }
     }
     for predicate in filters {
@@ -275,5 +275,5 @@ where
     if let Some(n) = sort_buffer_limit {
         q = q.sort_buffer_limit(n);
     }
-    Ok(q)
+    q
 }
