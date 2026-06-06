@@ -63,8 +63,10 @@
 //! - `#[obj(index)]`, `#[obj(index = unique)]`,
 //!   `#[obj(index = each)]` on a field — declare secondary indexes
 //!   (see § "Queries and indexes" below).
-//! - `#[obj(index_composite(fields = ("a", "b")))]` at struct
-//!   level — declare a composite index.
+//! - `#[obj(index = ("a", "b"))]` at struct level (optional
+//!   `name = "..."`) — declare a composite index. The older
+//!   `#[obj(index_composite(fields = ("a", "b")))]` long form is
+//!   also accepted.
 //!
 //! The one-shot API runs each call inside a private transaction
 //! and is the typical entry point for ad-hoc work:
@@ -431,7 +433,13 @@ pub use serde::{Deserialize, Serialize};
 /// | Standard  | `#[obj(index)]`                                          | B-tree index; duplicates allowed.          |
 /// | Unique    | `#[obj(index = unique)]`                                 | Uniqueness enforced at write time.         |
 /// | Each      | `#[obj(index = each)]`                                   | Indexes every element of a `Vec<T>` field. |
-/// | Composite | `#[obj(index_composite(fields = ("a", "b")))]`           | One index over a tuple of fields.          |
+/// | Composite | `#[obj(index = ("a", "b"))]`                             | One index over a tuple of fields.          |
+///
+/// A composite defaults its name to the fields joined with `__`; an
+/// optional sibling `name = "..."` in the same `#[obj(...)]` overrides
+/// it, e.g. `#[obj(index = ("a", "b"), name = "by_a_b")]`. The older
+/// `#[obj(index_composite(fields = ("a", "b"), name = "..."))]` long
+/// form is also accepted and behaves identically.
 ///
 /// ```
 /// # fn main() -> obj::Result<()> {
@@ -440,7 +448,7 @@ pub use serde::{Deserialize, Serialize};
 ///
 /// #[derive(Debug, Clone, Serialize, Deserialize, obj::Document)]
 /// #[obj(collection = "customers_idx_doc")]
-/// #[obj(index_composite(fields = ("region", "tier"), name = "by_region_tier"))]
+/// #[obj(index = ("region", "tier"), name = "by_region_tier")]
 /// struct Customer {
 ///     #[obj(index)]
 ///     customer_id: u64,
