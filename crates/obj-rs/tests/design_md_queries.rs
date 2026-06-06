@@ -218,9 +218,9 @@ fn find_unique_by_email_returns_the_customer() {
 /// ```
 ///
 /// `last_week..now` is a half-open `Range<Timestamp>`-shape;
-/// `Query::index_range` takes `impl RangeBounds<Dynamic>` so the
-/// caller materialises the bounds as `Dynamic::U64(...)` values
-/// inline.
+/// `Query::index_range` takes `impl DynamicRange`, so the bounds may
+/// be bare `Dynamic` values (as here) or any scalar that converts
+/// into one (`u64`, `&str`, …) — `40u64..60` works without wrapping.
 #[test]
 fn index_range_returns_recent_orders() {
     let (db, _dir) = fresh_db();

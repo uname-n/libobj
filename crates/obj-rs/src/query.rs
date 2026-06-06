@@ -27,7 +27,7 @@
 //! `Box<dyn Fn(&T) -> bool + 'static>`; `'static` lets the closure
 //! outlive the temporary builder.
 
-use std::ops::{Bound, RangeBounds};
+use std::ops::Bound;
 
 use obj_core::codec::Dynamic;
 use obj_core::{Error, Result};
@@ -151,9 +151,13 @@ where
     }
 
     /// Switch the query source from full-scan to the named index's
-    /// range. Bounds are [`Dynamic`] values; the builder encodes
-    /// them through `obj_core::index::encode_field` at call time so
-    /// the actual range arithmetic sees byte-ordered keys.
+    /// range. The bounds may be any scalar that converts into a
+    /// [`Dynamic`] (`u64`, `i64`, `&str`, …) — see
+    /// [`DynamicRange`](crate::DynamicRange) —
+    /// so a bare `40u64..60` works without wrapping each end in
+    /// `Dynamic::U64(..)`. The builder encodes them through
+    /// `obj_core::index::encode_field` at call time so the actual
+    /// range arithmetic sees byte-ordered keys.
     ///
     /// Order is by the index key bytes, not by primary `Id`. The
     /// scan is bounded to the slice of the index B-tree the range
@@ -161,12 +165,12 @@ where
     ///
     /// # Examples
     ///
-    /// Range query on an indexed `u64` field:
+    /// Range query on an indexed `u64` field — scalar bounds, no
+    /// `Dynamic::` wrapping:
     ///
     /// ```
     /// # fn main() -> obj::Result<()> {
     /// use obj::Db;
-    /// use obj_core::codec::Dynamic;
     /// use serde::{Deserialize, Serialize};
     ///
     /// #[derive(Debug, Serialize, Deserialize, obj::Document)]
@@ -181,11 +185,9 @@ where
     /// for i in 0..100u64 {
     ///     let _ = db.insert(Order { placed_at: i * 1_000 })?;
     /// }
-    /// let last_week = Dynamic::U64(30_000);
-    /// let now = Dynamic::U64(60_000);
     /// let recent: Vec<Order> = db
     ///     .query::<Order>()
-    ///     .index_range("placed_at", last_week..now)?
+    ///     .index_range("placed_at", 30_000u64..60_000)?
     ///     .fetch()?;
     /// assert_eq!(recent.len(), 30);
     /// # Ok(())
@@ -199,10 +201,11 @@ where
     ///   rejects those — see `obj_core::index::encode_field`).
     pub fn index_range<R>(mut self, name: &str, range: R) -> Result<Self>
     where
-        R: RangeBounds<Dynamic>,
+        R: crate::range::DynamicRange,
     {
-        let start = encode_bound(range.start_bound())?;
-        let end = encode_bound(range.end_bound())?;
+        let (start, end) = range.into_dynamic_bounds();
+        let start = encode_bound(start.as_ref())?;
+        let end = encode_bound(end.as_ref())?;
         self.source = Source::IndexRange {
             name: name.to_owned(),
             start,
