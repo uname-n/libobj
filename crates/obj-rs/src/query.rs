@@ -2,7 +2,7 @@
 //!
 //! `Query` is a thin builder over the `Collection` API. It
 //! borrows a `&Db` for the duration of the build phase; `.fetch()`
-//! and `.count()` consume / inspect the builder and open a fresh
+//! and `.count()` consume the builder and open a fresh
 //! `read_transaction` for the actual scan.
 //!
 //! ## Sources
@@ -413,8 +413,10 @@ where
     /// [`Query::sort_by`] (sort does not change the count) but
     /// honouring [`Query::limit`] (returns `min(total, limit)`).
     ///
-    /// Takes `&self` rather than consuming the builder so callers
-    /// can chain a follow-up `.fetch()` on the same predicate set.
+    /// Consumes the builder, matching [`Query::fetch`] and the async
+    /// `AsyncQuery::count` — a query builder is single-shot. Rebuild
+    /// (or `.clone()` the predicate set, if your filters allow it) to
+    /// run a follow-up `.fetch()` on the same predicates.
     ///
     /// # Fast path (no filter set)
     ///
@@ -478,7 +480,7 @@ where
     /// - Any error from the underlying [`crate::Collection`] scan.
     /// - [`obj_core::Error::DistinctCountExceeded`] on the `Each`
     ///   fast path.
-    pub fn count(&self) -> Result<u64> {
+    pub fn count(self) -> Result<u64> {
         #[cfg(feature = "tracing")]
         let span = tracing::debug_span!("query.execute", kind = tracing::field::Empty);
         #[cfg(feature = "tracing")]
@@ -490,7 +492,7 @@ where
             let total = if self.filters.is_empty() {
                 count_fast(&coll, &self.source)?
             } else {
-                count_slow(&coll, self)?
+                count_slow(&coll, &self)?
             };
             Ok(apply_count_limit(total, self.limit))
         })
