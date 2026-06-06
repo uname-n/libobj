@@ -37,6 +37,11 @@ unused-allowed-license = "allow"
 # reason, mirroring the `// allow: WHY` convention for lint suppressions.
 multiple-versions = "deny"
 wildcards = "deny"
+# Intra-workspace deps are declared as `{ path = "..." }` with no version by
+# design (see crates/obj-rs/Cargo.toml). cargo-deny defaults
+# `allow-wildcard-paths = false`, which flags those path deps as wildcards;
+# exempt them while still denying genuine published-crate wildcard versions.
+allow-wildcard-paths = true
 highlight = "all"
 deny = []
 skip = [
