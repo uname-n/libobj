@@ -790,8 +790,9 @@ impl Db {
     /// })?;
     ///
     /// // upsert at a caller-supplied id (insert or replace).
-    /// let id2 = obj::Id::try_new(42)
-    ///     .ok_or(obj::Error::InvalidArgument("non-zero"))?;
+    /// // `Id::new` is the literal constructor; use `Id::try_new` for
+    /// // ids derived from runtime input.
+    /// let id2 = obj::Id::new(42);
     /// db.upsert::<Order>(id2, Order {
     ///     customer_id: 2,
     ///     total_cents: 999,
