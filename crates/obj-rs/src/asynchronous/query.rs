@@ -14,7 +14,7 @@
 //! `blocking` pool.
 
 use std::marker::PhantomData;
-use std::ops::{Bound, RangeBounds};
+use std::ops::Bound;
 use std::sync::Arc;
 
 use obj_core::codec::Dynamic;
@@ -130,12 +130,13 @@ where
     #[must_use]
     pub fn index_range<R>(mut self, name: &str, range: R) -> Self
     where
-        R: RangeBounds<Dynamic>,
+        R: crate::range::DynamicRange,
     {
+        let (start, end) = range.into_dynamic_bounds();
         self.source = AsyncSource::IndexRange {
             name: name.to_owned(),
-            start: clone_dynamic_bound(range.start_bound()),
-            end: clone_dynamic_bound(range.end_bound()),
+            start,
+            end,
         };
         self
     }
@@ -275,12 +276,4 @@ where
         q = q.sort_buffer_limit(n);
     }
     Ok(q)
-}
-
-fn clone_dynamic_bound(b: Bound<&Dynamic>) -> Bound<Dynamic> {
-    match b {
-        Bound::Included(d) => Bound::Included(d.clone()),
-        Bound::Excluded(d) => Bound::Excluded(d.clone()),
-        Bound::Unbounded => Bound::Unbounded,
-    }
 }

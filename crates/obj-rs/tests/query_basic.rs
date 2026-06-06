@@ -170,6 +170,58 @@ fn query_index_range_walks_index_slice() {
     assert!(mid.iter().all(|o| (40..60).contains(&o.placed_at)));
 }
 
+/// A scalar-typed range (`40u64..60`) must yield byte-for-byte the
+/// same documents as the equivalent explicitly-`Dynamic`-wrapped
+/// bound tuple — the ergonomic form is pure sugar over the same
+/// encoding. Exercises the sync query path, the `Collection`
+/// range/count APIs, and the `..=` / open-ended forms.
+#[test]
+fn query_index_range_scalar_matches_dynamic_wrapped() {
+    let (db, _dir) = fresh_db();
+    seed_orders(&db, 100);
+
+    let wrapped: Vec<Order> = db
+        .query::<Order>()
+        .index_range(
+            "placed_at",
+            (
+                Bound::Included(Dynamic::U64(40)),
+                Bound::Excluded(Dynamic::U64(60)),
+            ),
+        )
+        .expect("wrapped index_range")
+        .fetch()
+        .expect("wrapped fetch");
+
+    let scalar: Vec<Order> = db
+        .query::<Order>()
+        .index_range("placed_at", 40u64..60)
+        .expect("scalar index_range")
+        .fetch()
+        .expect("scalar fetch");
+
+    assert_eq!(scalar, wrapped, "scalar range must equal Dynamic-wrapped");
+    assert_eq!(scalar.len(), 20);
+
+    // Inclusive scalar form covers one extra row at the top end.
+    let inclusive: Vec<Order> = db
+        .query::<Order>()
+        .index_range("placed_at", 40u64..=60)
+        .expect("inclusive index_range")
+        .fetch()
+        .expect("inclusive fetch");
+    assert_eq!(inclusive.len(), 21);
+
+    // Collection-level APIs accept the same scalar range.
+    let entries = db
+        .read_transaction(|txn| {
+            let coll = txn.collection::<Order>()?;
+            coll.count_index_range("placed_at", 40u64..60)
+        })
+        .expect("count_index_range");
+    assert_eq!(entries, 20);
+}
+
 #[test]
 fn query_index_range_empty_window_is_empty() {
     let (db, _dir) = fresh_db();

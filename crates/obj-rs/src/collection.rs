@@ -655,10 +655,13 @@ impl<'tx, T: Document> Collection<'tx, T> {
     }
 
     /// Yield `(user_key, doc)` pairs whose index key falls within
-    /// `range`. The bounds are [`Dynamic`](obj_core::codec::Dynamic)
-    /// values — the same ergonomic type [`crate::Query::index_range`]
-    /// takes — encoded internally through the order-preserving field
-    /// encoder ([`obj_core::index::encode_field`]); callers no longer
+    /// `range`. The bounds may be any scalar that converts into a
+    /// [`Dynamic`](obj_core::codec::Dynamic) — see
+    /// [`DynamicRange`](crate::DynamicRange) — so `40u64..60` works
+    /// without `Dynamic::U64(..)` wrapping, the same ergonomics
+    /// [`crate::Query::index_range`] offers. The bounds are encoded
+    /// internally through the order-preserving field encoder
+    /// ([`obj_core::index::encode_field`]); callers no longer
     /// hand-encode index-key bytes.
     ///
     /// For non-Unique kinds (`Standard` / `Each` / `Composite`) the
@@ -680,11 +683,12 @@ impl<'tx, T: Document> Collection<'tx, T> {
         range: R,
     ) -> Result<IndexIter<'static, (Vec<u8>, T)>>
     where
-        R: std::ops::RangeBounds<obj_core::codec::Dynamic>,
+        R: crate::range::DynamicRange,
         T: Send + 'static,
     {
-        let start = encode_dynamic_bound(range.start_bound())?;
-        let end = encode_dynamic_bound(range.end_bound())?;
+        let (start, end) = range.into_dynamic_bounds();
+        let start = encode_dynamic_bound(start.as_ref())?;
+        let end = encode_dynamic_bound(end.as_ref())?;
         self.index_range_encoded(index_name, start, end)
     }
 
@@ -785,11 +789,12 @@ impl<'tx, T: Document> Collection<'tx, T> {
     ///   and from each `next()` call.
     pub fn iter_range<'a, R>(&'a self, index_name: &str, range: R) -> Result<IterIndexRange<'a, T>>
     where
-        R: std::ops::RangeBounds<obj_core::codec::Dynamic>,
+        R: crate::range::DynamicRange,
         T: Send + 'static,
     {
-        let start_bound = encode_dynamic_bound(range.start_bound())?;
-        let end_bound = encode_dynamic_bound(range.end_bound())?;
+        let (start, end) = range.into_dynamic_bounds();
+        let start_bound = encode_dynamic_bound(start.as_ref())?;
+        let end_bound = encode_dynamic_bound(end.as_ref())?;
         self.iter_range_encoded(index_name, start_bound, end_bound)
     }
 
@@ -1088,10 +1093,11 @@ impl<'tx, T: Document> Collection<'tx, T> {
     /// - Pager / B-tree errors propagated.
     pub fn count_index_range<R>(&self, index_name: &str, range: R) -> Result<u64>
     where
-        R: std::ops::RangeBounds<obj_core::codec::Dynamic>,
+        R: crate::range::DynamicRange,
     {
-        let start = encode_dynamic_bound(range.start_bound())?;
-        let end = encode_dynamic_bound(range.end_bound())?;
+        let (start, end) = range.into_dynamic_bounds();
+        let start = encode_dynamic_bound(start.as_ref())?;
+        let end = encode_dynamic_bound(end.as_ref())?;
         self.count_index_range_encoded(index_name, start, end)
     }
 
@@ -1152,10 +1158,11 @@ impl<'tx, T: Document> Collection<'tx, T> {
     /// - Pager / B-tree errors propagated.
     pub fn count_distinct_ids_in_range<R>(&self, index_name: &str, range: R) -> Result<u64>
     where
-        R: std::ops::RangeBounds<obj_core::codec::Dynamic>,
+        R: crate::range::DynamicRange,
     {
-        let start = encode_dynamic_bound(range.start_bound())?;
-        let end = encode_dynamic_bound(range.end_bound())?;
+        let (start, end) = range.into_dynamic_bounds();
+        let start = encode_dynamic_bound(start.as_ref())?;
+        let end = encode_dynamic_bound(end.as_ref())?;
         self.count_distinct_ids_in_range_encoded(index_name, start, end)
     }
 
