@@ -43,8 +43,54 @@ use crate::error::{Error, Result};
 pub struct Id(NonZeroU64);
 
 impl Id {
+    /// Construct an [`Id`] from a raw `u64`, panicking if `raw` is the
+    /// reserved sentinel `0`.
+    ///
+    /// This is the ergonomic constructor for **known-good literals** —
+    /// tests, examples, doc-comments, and `const` contexts where the
+    /// value is fixed at the call site (`Id::new(1)`), so the zero case
+    /// cannot occur. It exists to avoid the `try_new(n).expect(..)`
+    /// ceremony for compile-time-constant ids.
+    ///
+    /// For any value derived from **runtime input** (a parsed request,
+    /// an FFI argument, a decoded byte stream), use
+    /// [`try_new`](Self::try_new) and handle the `None` case — never
+    /// `new`. Production code in this workspace forbids panics
+    /// (safety rule R7); `new` would violate that bound if fed
+    /// untrusted input, whereas `try_new` returns the rejection as an
+    /// `Option` the caller must handle.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `raw == 0`. Because the argument is a literal at the
+    /// call site, this surfaces a misuse at the point of writing rather
+    /// than masking it.
+    ///
+    /// ```
+    /// use obj_core::id::Id;
+    /// assert_eq!(Id::new(1).get(), 1);
+    /// ```
+    #[must_use]
+    // allow: `new` is the literals-only constructor; the panic fires only on the
+    // reserved sentinel `0`, which a fixed call-site literal never is. Runtime
+    // input must use `try_new` (R7). Scoped here so the no-panic bound still holds
+    // for every other production path in the crate.
+    #[allow(clippy::panic)]
+    pub const fn new(raw: u64) -> Self {
+        match NonZeroU64::new(raw) {
+            Some(nz) => Self(nz),
+            None => panic!("Id::new requires a non-zero value; 0 is the reserved sentinel — use Id::try_new for runtime input"),
+        }
+    }
+
     /// Construct an [`Id`] from a raw `u64`. Returns `None` if `raw`
     /// is `0` (per the sentinel-zero contract).
+    ///
+    /// This is the constructor for **runtime input** — parsed requests,
+    /// FFI arguments, decoded bytes — where `0` may legitimately occur
+    /// and must be handled. For compile-time-constant literals in
+    /// tests, examples, or `const` contexts, prefer the more concise
+    /// [`new`](Self::new).
     #[must_use]
     pub const fn try_new(raw: u64) -> Option<Self> {
         match NonZeroU64::new(raw) {
@@ -147,6 +193,26 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_builds_from_literal() {
+        assert_eq!(Id::new(1).get(), 1);
+        assert_eq!(Id::new(u64::MAX).get(), u64::MAX);
+        // `new` agrees with the checked path on every non-zero value.
+        assert_eq!(Some(Id::new(42)), Id::try_new(42));
+    }
+
+    #[test]
+    fn new_is_const() {
+        const ID: Id = Id::new(7);
+        assert_eq!(ID.get(), 7);
+    }
+
+    #[test]
+    #[should_panic(expected = "non-zero value")]
+    fn new_panics_on_zero() {
+        let _ = Id::new(0);
+    }
 
     #[test]
     fn try_new_rejects_zero() {
