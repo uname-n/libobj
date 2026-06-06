@@ -409,6 +409,53 @@ where
         })
     }
 
+    /// Execute the query and return the first matching document, or
+    /// `None` when nothing matches.
+    ///
+    /// Sugar for `.limit(1).fetch()?.into_iter().next()`: it forces an
+    /// internal `.limit(1)` and reuses the [`Query::fetch`] decode path
+    /// — there is no second scan route. All previously-configured
+    /// filters, [`Query::index_range`], and [`Query::sort_by`] are
+    /// honoured. With a sort key set the buffer is filled, sorted, then
+    /// truncated to one, so "first" is the smallest by the sort key;
+    /// without one, "first" is the first in source order (primary `Id`
+    /// for a full scan, index-key bytes for an `index_range`).
+    ///
+    /// A previously-set `.limit(N)` is overridden — `first` returns at
+    /// most one document by construction.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() -> obj::Result<()> {
+    /// use obj::Db;
+    /// use serde::{Deserialize, Serialize};
+    ///
+    /// #[derive(Debug, Serialize, Deserialize, obj::Document)]
+    /// #[obj(collection = "orders_first_doc")]
+    /// struct Order { customer_id: u64 }
+    ///
+    /// let dir = tempfile::tempdir()?;
+    /// let db = Db::open(dir.path().join("first.obj"))?;
+    /// for i in 0..5u64 {
+    ///     let _ = db.insert(Order { customer_id: i })?;
+    /// }
+    /// let one: Option<Order> = db
+    ///     .query::<Order>()
+    ///     .filter(|o| o.customer_id == 3)
+    ///     .first()?;
+    /// assert_eq!(one.map(|o| o.customer_id), Some(3));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`Query::fetch`].
+    pub fn first(self) -> Result<Option<T>> {
+        Ok(self.limit(1).fetch()?.into_iter().next())
+    }
+
     /// Count the documents this query would return, ignoring
     /// [`Query::sort_by`] (sort does not change the count) but
     /// honouring [`Query::limit`] (returns `min(total, limit)`).
