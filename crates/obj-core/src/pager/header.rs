@@ -16,7 +16,7 @@ pub const MAGIC: [u8; 4] = *b"OBJF";
 
 /// Format major version implemented by this build.
 ///
-/// Every new database the v1.0.0 writer creates stamps
+/// Every new database this build's writer creates stamps
 /// `format_major = 1` on page 0. Readers accept `format_major ∈
 /// {0, 1}` so pre-1.0 (0.x-era) databases continue to open
 /// without a migration tool; see `SUPPORTED_FORMAT_MAJORS`
@@ -24,14 +24,14 @@ pub const MAGIC: [u8; 4] = *b"OBJF";
 pub const FORMAT_MAJOR: u16 = 1;
 /// The set of `format_major` values this build's reader accepts.
 ///
-/// - `0` — pre-1.0 (0.x) databases. Read-compatible only; v1.0
-///   writers never produce new `format_major = 0` files.
-/// - `1` — v1.0 frozen wire format (this build's writer).
+/// - `0` — pre-1.0 (0.x) databases. Read-compatible only; this
+///   build's writer never produces new `format_major = 0` files.
+/// - `1` — current stable wire format (this build's writer).
 ///
-/// A future v2.0 build will reject `format_major = 0` and `1` in
-/// favour of `2`.
+/// A future `format_major = 2` build will reject `format_major = 0`
+/// and `1` in favour of `2`.
 ///
-/// Private to the crate so the v1.0 public API surface stays
+/// Private to the crate so the public API surface stays
 /// pinned; the WAL recovery path
 /// re-exports the helper [`is_supported_format_major`].
 pub(crate) const SUPPORTED_FORMAT_MAJORS: &[u16] = &[0, 1];
@@ -41,7 +41,7 @@ pub(crate) const SUPPORTED_FORMAT_MAJORS: &[u16] = &[0, 1];
 /// Exposed for the WAL header reader, which validates that a
 /// `-wal` sidecar's `format_major` field is in the same set the
 /// page-0 decoder accepts. Public on `pub(crate)` to avoid
-/// duplicating the slice in the WAL module while keeping the v1.0
+/// duplicating the slice in the WAL module while keeping the
 /// public-API surface unchanged.
 #[must_use]
 pub(crate) fn is_supported_format_major(format_major: u16) -> bool {
@@ -64,9 +64,9 @@ pub(crate) fn is_supported_format_major(format_major: u16) -> bool {
 ///   tag). Compression (bit 0) and encryption (bit 1) compose:
 ///   compress first, encrypt second.
 ///
-/// `FORMAT_MINOR` is frozen at `2` for the
-/// indefinite v1.x series — no further minor bumps without a
-/// `format_major` 2.0 release.
+/// `FORMAT_MINOR` is stable at `2` for the
+/// `format_major = 1` series — no further minor bumps without a
+/// `format_major = 2` release.
 pub const FORMAT_MINOR: u16 = 2;
 
 /// `feature_flags` bit indicating the file uses per-page LZ4
@@ -168,9 +168,9 @@ impl FileHeader {
     /// Header for a freshly-initialised database: just page 0, no
     /// catalog, empty freelist, zero WAL salt and UUID.
     ///
-    /// Every v1.0 writer stamps
-    /// `format_major = 1, format_minor = 2` — the feature-complete
-    /// frozen baseline. `feature_flags = 0` because this constructor
+    /// This build's writer stamps
+    /// `format_major = 1, format_minor = 2` — the current
+    /// feature-complete baseline. `feature_flags = 0` because this constructor
     /// produces a plain (no-compression, no-encryption) file; the
     /// other `new_empty_*` constructors set the corresponding
     /// `feature_flags` bits.
@@ -192,7 +192,7 @@ impl FileHeader {
 
     /// Header for a freshly-initialised
     /// compression-capable database. `feature_flags` bit 0 set;
-    /// `format_minor` is the frozen v1.0 feature-complete value
+    /// `format_minor` is the current `format_major = 1` feature-complete value
     /// ([`FORMAT_MINOR`] = 2). Everything else matches
     /// [`FileHeader::new_empty`].
     #[must_use]
@@ -296,14 +296,14 @@ pub fn encode_header(header: &FileHeader, page: &mut Page) {
 ///
 /// Readers accept any
 /// `SUPPORTED_FORMAT_MAJORS` value (`0` for pre-1.0 databases,
-/// `1` for v1.0+). The per-major `format_minor` constraint is:
+/// `1` for `format_major = 1`). The per-major `format_minor` constraint is:
 ///
 /// - `format_major = 0` → `format_minor ∈ {0, 1, 2}` (the pre-1.0
 ///   incremental rollout: baseline, compression-capable,
 ///   encryption-capable).
-/// - `format_major = 1` → `format_minor = 2` (the v1.0 frozen
-///   feature-complete value; the only valid minor inside the v1.x
-///   series).
+/// - `format_major = 1` → `format_minor = 2` (the current
+///   `format_major = 1` feature-complete value; the only valid minor
+///   inside the `format_major = 1` series).
 ///
 /// # Errors
 ///
@@ -382,8 +382,8 @@ fn read_array<const N: usize>(buf: &[u8; PAGE_SIZE], off: usize) -> [u8; N] {
 
 /// Per-major `format_minor` enforcement.
 ///
-/// v1.0 freezes `format_minor = 2` as the only minor for
-/// `format_major = 1`; pre-1.0 (`format_major = 0`) files keep
+/// The `format_major = 1` series fixes `format_minor = 2` as its
+/// only valid minor; pre-1.0 (`format_major = 0`) files keep
 /// their historical `format_minor ∈ {0, 1, 2}` range. Any other
 /// pairing (including any major outside [`SUPPORTED_FORMAT_MAJORS`])
 /// returns `false`; the caller surfaces that as
@@ -502,8 +502,8 @@ mod tests {
 
     /// Backward-compat reader contract. A
     /// pre-1.0 (`format_major = 0`) file with the baseline
-    /// `format_minor = 0` MUST open under the v1.0 reader. We
-    /// synthesize one by hand (no v1.0 writer can produce a
+    /// `format_minor = 0` MUST open under this build's reader. We
+    /// synthesize one by hand (this build's writer cannot produce a
     /// `format_major = 0` file) and confirm `decode_header`
     /// accepts it.
     #[test]
@@ -530,7 +530,7 @@ mod tests {
 
     /// A pre-1.0 compression-capable file
     /// (`format_major = 0, format_minor = 1`) MUST open under
-    /// the v1.0 reader.
+    /// this build's reader.
     #[test]
     fn decodes_legacy_format_major_zero_minor_one() {
         let h = FileHeader {
@@ -576,8 +576,8 @@ mod tests {
     }
 
     /// A `format_major = 1` file with
-    /// `format_minor = 0` or `1` must be rejected. The v1.0
-    /// freeze locks the only valid minor for major 1 at 2.
+    /// `format_minor = 0` or `1` must be rejected. The
+    /// `format_major = 1` series locks the only valid minor for major 1 at 2.
     #[test]
     fn rejects_format_major_one_with_legacy_minor() {
         for bad_minor in [0u16, 1u16] {
