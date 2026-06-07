@@ -9,10 +9,12 @@ relational storage.
 
 Crate name `obj-rs`; import as `obj`.
 
-**Stability.** v1.0 froze the on-disk format (`format_major = 1`) and the
-public Rust API under strict SemVer. Backwards-incompatible changes
-require a 2.0 release with a migration tool; readers still open pre-1.0
-(`format_major = 0`) files.
+**Stability.** The on-disk format is versioned and stable: new databases are
+written at `format_major = 1`, and readers still open older pre-1.0
+(`format_major = 0`) files without a migration tool. The public Rust API is
+still pre-1.0 (`0.2.0`) and is **not** yet frozen under SemVer — it may change
+in a future `0.x` release before the 1.0 freeze; pin a specific tag (e.g.
+`tag = "v0.2.0"`) to insulate yourself from breaking changes.
 
 ---
 
