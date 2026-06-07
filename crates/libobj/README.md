@@ -18,8 +18,8 @@ need not be recompiled across `obj` patch / minor releases.
 
 ```bash
 cargo build --release -p libobj
-# produces target/release/liblibobj.{dylib,so},
-#          target/release/liblibobj.a,
+# produces target/release/libobj.{dylib,so},
+#          target/release/libobj.a,
 #          and crates/libobj/include/libobj.h
 ```
 
