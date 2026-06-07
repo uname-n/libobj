@@ -13,7 +13,7 @@ The engine is written in Rust and shipped as a Rust crate and a C ABI.
 ```toml
 # Cargo.toml
 [dependencies]
-obj-rs = { git = "https://github.com/uname-n/libobj", tag = "v0.2.0" }
+obj-rs = { git = "https://github.com/uname-n/libobj", tag = "v0.3.0" }
 serde = { version = "1", features = ["derive"] }
 ```
 
@@ -171,9 +171,9 @@ The on-disk format is versioned and stable: new databases are written at
 `format_major = 1`, and readers still open older pre-1.0 (`format_major = 0`)
 files without a migration tool.
 
-The public Rust API is still pre-1.0 (`0.2.0`) and is **not** yet frozen under
+The public Rust API is still pre-1.0 (`0.3.0`) and is **not** yet frozen under
 SemVer — it may change in a future `0.x` release before the 1.0 freeze. Pin a
-specific tag (e.g. `tag = "v0.2.0"`) to insulate yourself from breaking changes.
+specific tag (e.g. `tag = "v0.3.0"`) to insulate yourself from breaking changes.
 
 ## Coverage
 

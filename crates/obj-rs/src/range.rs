@@ -6,8 +6,8 @@
 //! ([`crate::Query::index_range`], [`crate::Collection::index_range`],
 //! [`crate::Collection::iter_range`],
 //! [`crate::Collection::count_index_range`],
-//! [`crate::Collection::count_distinct_ids_in_range`], and their async
-//! mirror) used to force every bound through an explicit
+//! [`crate::Collection::count_distinct_ids_in_range`]) used to force
+//! every bound through an explicit
 //! `Dynamic::U64(..)` wrapper because they took `R: RangeBounds<Dynamic>`.
 //!
 //! [`DynamicRange`] removes that asymmetry: any standard range whose

@@ -507,7 +507,7 @@ fn query_count_with_sort_and_limit_matches_filtered_total_min_limit() {
 fn query_count_can_be_called_then_fetch_via_separate_builders() {
     let (db, _dir) = fresh_db();
     seed_orders(&db, 10);
-    // `count` consumes its builder (like `fetch` and async `count`), so
+    // `count` consumes its builder (like `fetch`), so
     // a follow-up `fetch` runs on a freshly built, separate builder.
     let q = db.query::<Order>().filter(|o| o.placed_at >= 5);
     let n = q.count().expect("count");

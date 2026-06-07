@@ -115,6 +115,8 @@ pub struct Collection<'tx, T: Document> {
     /// name (which may differ from `T::COLLECTION`, e.g.
     /// `"archive.orders"` against a type whose declared `COLLECTION`
     /// is `"orders"`).
+    // allow: field name intentionally repeats the `collection_*` prefix of
+    // its `Collection<T>` container; renaming would lose clarity at use sites.
     #[allow(clippy::struct_field_names)]
     collection_name: Cow<'static, str>,
     /// Cached descriptor.  Populated at construction for `Write` /

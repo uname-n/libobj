@@ -7,9 +7,9 @@
 //! to `crates.io` only because `obj-rs` depends on it; its public API carries
 //! **no `SemVer` guarantee** and may change in any release, including patch
 //! releases. Do not depend on `obj-core` directly — depend on `obj-rs` and
-//! use the `obj` crate's API. Only `obj-rs`'s public surface is frozen at
-//! 1.0; `obj-core` is deliberately excluded from the public-api freeze
-//! gate so the engine can evolve freely.
+//! use the `obj` crate's API. Only `obj-rs`'s public surface is the
+//! supported, `SemVer`-governed API; `obj-core` is deliberately excluded
+//! from the public-api stability gate so the engine can evolve freely.
 //!
 //! This crate hosts the layered storage engine: the platform syscall
 //! wrappers (L0), the pager (L1), the WAL (L2), the B-tree (L3), the

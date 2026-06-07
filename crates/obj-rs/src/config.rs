@@ -264,7 +264,7 @@ impl Config {
     ///
     /// `mode = CompressionMode::Lz4` causes [`crate::Db::open_with`]
     /// to create a brand-new database file at `format_minor = 2`
-    /// (the v1.0 feature-complete minor; the LZ4 layer is signalled
+    /// (the current `format_major = 1` feature-complete minor; the LZ4 layer is signalled
     /// by a per-page flag bit, not by the minor version) with the
     /// LZ4 page-compression layer engaged. Pages are
     /// compressed at the pager layer only — every higher-level

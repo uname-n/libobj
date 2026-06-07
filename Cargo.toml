@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.93"
 repository = "https://github.com/uname-n/libobj"
 authors = ["libobj contributors"]
-version = "0.2.0"
+version = "0.3.0"
 
 [workspace.lints.rust]
 # Rule 10 — Zero warnings. Deny the whole rustc warnings group at the manifest

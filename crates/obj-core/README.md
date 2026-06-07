@@ -17,7 +17,7 @@ codec, catalog, crypto, and integrity checks.
 
 | Module      | Responsibility                                                        |
 |-------------|-----------------------------------------------------------------------|
-| `pager`     | Fixed-size page cache over the file; optional LZ4 / ChaCha20-Poly1305.|
+| `pager`     | Fixed-size page cache over the file; optional LZ4 / XChaCha20-Poly1305.|
 | `wal`       | Write-ahead log: frames, commit records, checkpoint folding.          |
 | `btree`     | Byte-aware B+tree for primary and secondary keys.                     |
 | `codec`     | Positional, schema-driven postcard encode / decode.                   |
