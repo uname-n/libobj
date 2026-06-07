@@ -20,10 +20,6 @@
 
 #![forbid(unsafe_code)]
 
-#[cfg(feature = "fast-alloc")]
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 use std::hint::black_box;
 use std::time::Duration;
 

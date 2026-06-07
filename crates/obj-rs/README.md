@@ -67,7 +67,6 @@ All features are off by default — enable them on the git dependency in
 | `tracing`     | Structured spans around open, transactions, queries, and checkpoints.        |
 | `compression` | LZ4 per-page compression at the pager layer.                                 |
 | `encryption`  | XChaCha20-Poly1305 per-page at-rest encryption.                              |
-| `fast-alloc`  | Use mimalloc as the global allocator (off by default).                       |
 
 Build the API docs locally for per-feature details (see
 [Documentation](#documentation)).
