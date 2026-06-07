@@ -31,7 +31,6 @@ obj-core = { path = "../obj-core" }
 obj-derive = { path = "../obj-derive" }
 serde = { version = "1", features = ["derive"], optional = true }
 tracing = { version = "0.1", optional = true }
-mimalloc = { version = "0.1", optional = true }
 
 [features]
 default = []
@@ -39,7 +38,6 @@ serde = ["dep:serde"]
 tracing = ["dep:tracing", "obj-core/tracing"]
 compression = ["obj-core/compression"]
 encryption = ["obj-core/encryption"]
-fast-alloc = ["dep:mimalloc"]
 
 [dev-dependencies]
 tempfile = "3"
