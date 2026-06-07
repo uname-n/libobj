@@ -21,7 +21,7 @@ require a 2.0 release with a migration tool; readers still open pre-1.0
 ```toml
 # Cargo.toml
 [dependencies]
-obj-rs = { git = "https://github.com/uname-n/libobj", tag = "v0.1.0" }
+obj-rs = { git = "https://github.com/uname-n/libobj", tag = "v0.2.0" }
 serde = { version = "1", features = ["derive"] }
 ```
 
@@ -57,7 +57,7 @@ for queries, indexes, transactions, and migrations.
 
 All features are off by default — enable them on the git dependency in
 `Cargo.toml`, e.g.
-`obj-rs = { git = "https://github.com/uname-n/libobj", tag = "v0.1.0", features = ["serde"] }`.
+`obj-rs = { git = "https://github.com/uname-n/libobj", tag = "v0.2.0", features = ["serde"] }`.
 
 | Feature       | What it does                                                                 |
 |---------------|------------------------------------------------------------------------------|
