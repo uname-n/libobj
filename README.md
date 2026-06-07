@@ -13,7 +13,7 @@ The engine is written in Rust and shipped as a Rust crate and a C ABI.
 ```toml
 # Cargo.toml
 [dependencies]
-obj-rs = { git = "https://github.com/uname-n/libobj", tag = "v0.1.0" }
+obj-rs = { git = "https://github.com/uname-n/libobj", tag = "v0.2.0" }
 serde = { version = "1", features = ["derive"] }
 ```
 
