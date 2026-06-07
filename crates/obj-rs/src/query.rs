@@ -460,8 +460,8 @@ where
     /// [`Query::sort_by`] (sort does not change the count) but
     /// honouring [`Query::limit`] (returns `min(total, limit)`).
     ///
-    /// Consumes the builder, matching [`Query::fetch`] and the async
-    /// `AsyncQuery::count` — a query builder is single-shot. Rebuild
+    /// Consumes the builder, matching [`Query::fetch`] — a query
+    /// builder is single-shot. Rebuild
     /// (or `.clone()` the predicate set, if your filters allow it) to
     /// run a follow-up `.fetch()` on the same predicates.
     ///

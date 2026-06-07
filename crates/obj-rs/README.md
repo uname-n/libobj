@@ -67,7 +67,6 @@ All features are off by default — enable them on the git dependency in
 | `tracing`     | Structured spans around open, transactions, queries, and checkpoints.        |
 | `compression` | LZ4 per-page compression at the pager layer.                                 |
 | `encryption`  | ChaCha20-Poly1305 per-page at-rest encryption.                               |
-| `async`       | Runtime-agnostic `obj::asynchronous` mirror of the blocking API.             |
 
 Build the API docs locally for per-feature details (see
 [Documentation](#documentation)).

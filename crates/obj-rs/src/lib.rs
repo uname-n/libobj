@@ -188,9 +188,7 @@
 //! when the handle is shared and you cannot get `&mut` — typically an
 //! `Arc<Db>` cloned across threads. Both mutate the same
 //! interior-mutable, mutex-guarded registry, so the choice is purely
-//! about which receiver your call site can produce. (The async
-//! `AsyncDb::attach` only offers the `&mut self` form; see its docs
-//! for how it behaves when the inner `Arc` is shared.)
+//! about which receiver your call site can produce.
 //!
 //! [`Db::backup_to`] writes a self-contained `.obj` file at the
 //! LSN of an internally-taken reader snapshot. Writers continue
@@ -270,15 +268,6 @@
 //!   and refuses (with `Error::FormatFeatureUnsupported`) a file
 //!   whose bit 1 is set — the refusal keys off the feature flag, not
 //!   the minor version.
-//! - `async` (off by default) — runtime-agnostic async surface
-//!   mirroring the blocking [`Db`] / [`Collection`] / [`Query`]
-//!   API behind a new `obj::asynchronous` module. Work is routed
-//!   through the
-//!   `blocking` crate's process-wide
-//!   thread pool, so the wrapper composes with Tokio, smol, and any
-//!   other async runtime — no per-runtime
-//!   sub-features. With the feature off the baseline build adds
-//!   no new transitive dependencies and no async overhead.
 //!
 //! # Observability
 //!
@@ -314,9 +303,6 @@
     clippy::todo,
     clippy::unimplemented
 ))]
-
-#[cfg(feature = "async")]
-pub mod asynchronous;
 
 mod collection;
 mod config;
