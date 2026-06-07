@@ -318,21 +318,21 @@
 #[cfg(feature = "async")]
 pub mod asynchronous;
 
-mod cli;
 mod collection;
 mod config;
 mod db;
 mod index_bound;
 mod index_maint;
+mod inspect;
 mod integrity;
 mod query;
 mod range;
 mod txn;
 
-pub use crate::cli::{CollectionStat, DbStat, DumpIter, DumpRecord};
 pub use crate::collection::{Collection, IterIndexRange, MAX_DISTINCT_IDS};
 pub use crate::config::Config;
 pub use crate::db::{Db, IterAll};
+pub use crate::inspect::{CollectionStat, DbStat, DumpIter, DumpRecord};
 pub use crate::query::{Query, MAX_SORT_BUFFER};
 pub use crate::range::DynamicRange;
 pub use crate::txn::{ReadTxn, WriteTxn};
