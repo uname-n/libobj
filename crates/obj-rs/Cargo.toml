@@ -81,6 +81,10 @@ name = "perf_table"
 harness = false
 
 [[bench]]
+name = "mem_off"
+harness = false
+
+[[bench]]
 name = "quick"
 harness = false
 
