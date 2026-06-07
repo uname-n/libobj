@@ -501,7 +501,7 @@ fn find_leaf_value(
 /// `BorrowedLeaf` is the read-path counterpart to [`DecodedNode`] for
 /// leaves: it validates the leaf header and every slot up front (the
 /// identical per-slot bounds / varint / over-long-key / strictly-
-/// ascending checks [`decode_leaf_body`] applies), but it does **not**
+/// ascending checks `decode_leaf_body` applies), but it does **not**
 /// copy any key or value into a `Vec`. Each entry is materialized on
 /// demand as a `(&[u8], &[u8])` pair borrowing directly into the page
 /// bytes.
@@ -631,9 +631,9 @@ impl<'a> BorrowedLeaf<'a> {
 
 /// Read the `i`-th leaf slot of `buf` as borrowed `(key, value)`
 /// slices. Applies the identical per-slot bounds / varint / over-long-
-/// key checks as [`decode_leaf_body`]; does NOT re-check ordering
+/// key checks as `decode_leaf_body`; does NOT re-check ordering
 /// (the caller validated the whole leaf once via
-/// [`validate_borrowed_leaf_slots`]).
+/// `validate_borrowed_leaf_slots`).
 ///
 /// Public so that read-path iterators can hold a validated leaf's
 /// backing page bytes and re-read a single entry per step without
