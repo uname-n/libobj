@@ -31,7 +31,6 @@ obj-core = { path = "../obj-core" }
 obj-derive = { path = "../obj-derive" }
 serde = { version = "1", features = ["derive"], optional = true }
 tracing = { version = "0.1", optional = true }
-blocking = { version = "1", optional = true }
 mimalloc = { version = "0.1", optional = true }
 
 [features]
@@ -40,7 +39,6 @@ serde = ["dep:serde"]
 tracing = ["dep:tracing", "obj-core/tracing"]
 compression = ["obj-core/compression"]
 encryption = ["obj-core/encryption"]
-async = ["dep:blocking"]
 fast-alloc = ["dep:mimalloc"]
 
 [dev-dependencies]
@@ -53,8 +51,6 @@ criterion = { version = "0.5", default-features = false, features = ["cargo_benc
 rand = "0.9"
 rand_chacha = "0.9"
 postcard = { version = "1", default-features = false, features = ["alloc"] }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
-smol = "2"
 
 [[bench]]
 name = "concurrent_reads"
