@@ -3,14 +3,16 @@
 This document specifies the byte-level on-disk format of a libobj database.
 It is the **stable contract** of the project: the `obj-core` crate is an
 unstable implementation detail with no SemVer guarantee, but the format
-described here is frozen for the entire v1.x series. A file written by any
-v1.x build opens in any other v1.x build, and a future v2.0 build will reject
-v1 files rather than silently misinterpret them.
+described here is stable for the entire `format_major = 1` series. A file
+written by any `format_major = 1` build opens in any other, and a future
+`format_major = 2` build will reject `format_major = 1` files rather than
+silently misinterpret them.
 
-- **Format version:** `format_major = 1`, `format_minor = 2` (the v1.0 frozen,
-  feature-complete baseline).
-- **Reader compatibility:** v1.x readers also accept pre-1.0 (`format_major =
-  0`) files, read-only; v1.x writers never produce `format_major = 0`.
+- **Format version:** `format_major = 1`, `format_minor = 2` (the
+  `format_major = 1` feature-complete baseline).
+- **Reader compatibility:** `format_major = 1` readers also accept pre-1.0
+  (`format_major = 0`) files, read-only; `format_major = 1` writers never
+  produce `format_major = 0`.
 - **Endianness:** every multi-byte integer on disk is **little-endian**.
 - **Checksum:** CRC32C (Castagnoli polynomial) everywhere a checksum appears.
 
@@ -49,7 +51,7 @@ The first 4096-byte page. Magic `OBJF` (ASCII). All fields little-endian.
 | Offset | Size | Field | Description |
 |-------:|-----:|-------|-------------|
 | 0   | 4  | `magic`          | ASCII `OBJF` (`4F 42 4A 46`). |
-| 4   | 2  | `format_major`   | `1` for v1.x; reader also accepts `0`. |
+| 4   | 2  | `format_major`   | `1` for current builds; reader also accepts `0`. |
 | 6   | 2  | `format_minor`   | `2` for `format_major = 1`. |
 | 8   | 2  | `page_size`      | `4096`. |
 | 10  | 4  | `feature_flags`  | Bit 0 = LZ4 compression, bit 1 = encryption. |
@@ -194,9 +196,9 @@ allocate ids independently. The serde representation of an id is its inner
 
 | `format_major` | `format_minor` | Status |
 |---------------:|---------------:|--------|
-| 0 | 0, 1, 2 | Pre-1.0 files. v1.x readers accept them read-compatibly. |
-| 1 | 2       | The v1.0 frozen wire format. The only valid minor for major 1. |
+| 0 | 0, 1, 2 | Pre-1.0 files. `format_major = 1` readers accept them read-compatibly. |
+| 1 | 2       | The current stable wire format. The only valid minor for major 1. |
 
-The format is frozen for the v1.x series: no minor bumps without a `major = 2`
-release. A v2.0 build will reject `format_major ∈ {0, 1}` outright rather than
-risk misreading them.
+The format is stable for the `format_major = 1` series: no minor bumps without
+a `major = 2` release. A `format_major = 2` build will reject
+`format_major ∈ {0, 1}` outright rather than risk misreading them.

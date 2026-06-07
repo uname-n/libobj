@@ -791,6 +791,8 @@ enum Frame {
         acc: Option<Dynamic>,
         /// Dotted path leading up to (but not including) this enum,
         /// reused for diagnostic mismatch errors.
+        // allow: retained for diagnostic mismatch errors (see doc above); not
+        // read on every code path, so dead_code fires without this allow.
         #[allow(dead_code)]
         path_prefix: String,
     },

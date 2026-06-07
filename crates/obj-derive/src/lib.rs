@@ -6,8 +6,8 @@
 //! `obj::Document`). It is published only so `obj-rs` can depend on it and
 //! carries **no `SemVer` guarantee** as a standalone crate — depend on
 //! `obj-rs` and write `#[derive(obj::Document)]`. Only `obj-rs`'s public
-//! surface is frozen at 1.0; `obj-derive` is excluded from the public-api
-//! freeze gate.
+//! surface is the supported, `SemVer`-governed API; `obj-derive` is excluded
+//! from the public-api stability gate.
 //!
 //! This crate provides `#[derive(obj::Document)]`, which emits the
 //! `obj_core::Document` implementation for a user struct. The derive is intentionally

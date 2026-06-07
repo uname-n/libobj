@@ -254,7 +254,7 @@
 //!   `tokio` and `axum`.
 //! - `compression` (off by default) — LZ4 per-page compression at
 //!   the pager layer. Propagates to obj-core.
-//!   Every v1.0 writer stamps `format_minor = 2` regardless of which
+//!   Every `format_major = 1` writer stamps `format_minor = 2` regardless of which
 //!   codecs are enabled; whether a file *uses* compression is
 //!   recorded by `feature_flags` bit 0, not by the minor. A build
 //!   WITHOUT this feature opens any file whose bit 0 is clear, and
