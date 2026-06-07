@@ -2,7 +2,7 @@
 //!
 //! `Query` is a thin builder over the `Collection` API. It
 //! borrows a `&Db` for the duration of the build phase; `.fetch()`
-//! and `.count()` consume / inspect the builder and open a fresh
+//! and `.count()` consume the builder and open a fresh
 //! `read_transaction` for the actual scan.
 //!
 //! ## Sources
@@ -27,7 +27,7 @@
 //! `Box<dyn Fn(&T) -> bool + 'static>`; `'static` lets the closure
 //! outlive the temporary builder.
 
-use std::ops::{Bound, RangeBounds};
+use std::ops::Bound;
 
 use obj_core::codec::Dynamic;
 use obj_core::{Error, Result};
@@ -64,17 +64,19 @@ enum Source {
     /// Full primary-tree scan via [`crate::Collection::all`].
     Full,
     /// Walk the named index's B-tree slice via
-    /// [`crate::Collection::index_range`]. Bounds are stored as
-    /// already-encoded byte ranges — the builder runs
-    /// `encode_field` at the boundary so the borrow-checker does not
-    /// need to track `Dynamic` across the read txn.
+    /// [`crate::Collection::index_range`]. Bounds are stored as the
+    /// requested `Dynamic` values, unencoded — the terminal
+    /// `.fetch()` / `.count()` call runs `encode_field` so that the
+    /// fluent builder step ([`Query::index_range`]) can stay
+    /// infallible and any encode error surfaces from the terminal
+    /// `Result` rather than mid-chain.
     IndexRange {
         /// Index name.
         name: String,
-        /// Encoded lower bound.
-        start: Bound<Vec<u8>>,
-        /// Encoded upper bound.
-        end: Bound<Vec<u8>>,
+        /// Requested lower bound (encoded at fetch/count time).
+        start: Bound<Dynamic>,
+        /// Requested upper bound (encoded at fetch/count time).
+        end: Bound<Dynamic>,
     },
 }
 
@@ -151,9 +153,17 @@ where
     }
 
     /// Switch the query source from full-scan to the named index's
-    /// range. Bounds are [`Dynamic`] values; the builder encodes
-    /// them through `obj_core::index::encode_field` at call time so
-    /// the actual range arithmetic sees byte-ordered keys.
+    /// range. The bounds may be any scalar that converts into a
+    /// [`Dynamic`] (`u64`, `i64`, `&str`, …) — see
+    /// [`DynamicRange`](crate::DynamicRange) —
+    /// so a bare `40u64..60` works without wrapping each end in
+    /// `Dynamic::U64(..)`. The bounds are stored unencoded; the
+    /// terminal `.fetch()` / `.count()` call runs them through
+    /// `obj_core::index::encode_field` so the actual range arithmetic
+    /// sees byte-ordered keys. This keeps the builder step infallible
+    /// — it returns `Self`, so the fluent chain needs no mid-chain
+    /// `?`. An unencodable bound (see *Deferred errors*) surfaces from
+    /// the terminal `Result` instead.
     ///
     /// Order is by the index key bytes, not by primary `Id`. The
     /// scan is bounded to the slice of the index B-tree the range
@@ -161,12 +171,12 @@ where
     ///
     /// # Examples
     ///
-    /// Range query on an indexed `u64` field:
+    /// Range query on an indexed `u64` field — scalar bounds, no
+    /// `Dynamic::` wrapping, and no mid-chain `?`:
     ///
     /// ```
     /// # fn main() -> obj::Result<()> {
     /// use obj::Db;
-    /// use obj_core::codec::Dynamic;
     /// use serde::{Deserialize, Serialize};
     ///
     /// #[derive(Debug, Serialize, Deserialize, obj::Document)]
@@ -181,34 +191,36 @@ where
     /// for i in 0..100u64 {
     ///     let _ = db.insert(Order { placed_at: i * 1_000 })?;
     /// }
-    /// let last_week = Dynamic::U64(30_000);
-    /// let now = Dynamic::U64(60_000);
     /// let recent: Vec<Order> = db
     ///     .query::<Order>()
-    ///     .index_range("placed_at", last_week..now)?
+    ///     .index_range("placed_at", 30_000u64..60_000)
     ///     .fetch()?;
     /// assert_eq!(recent.len(), 30);
     /// # Ok(())
     /// # }
     /// ```
     ///
-    /// # Errors
+    /// # Deferred errors
     ///
-    /// - [`obj_core::Error::Codec`] if a `Dynamic::String` bound
-    ///   carries an embedded NUL byte (the order-preserving encoder
-    ///   rejects those — see `obj_core::index::encode_field`).
-    pub fn index_range<R>(mut self, name: &str, range: R) -> Result<Self>
+    /// `index_range` itself is infallible — it only stores the
+    /// requested bounds. The order-preserving encoder runs during
+    /// [`Query::fetch`] / [`Query::count`]; a bound that cannot be
+    /// encoded (e.g. a `Dynamic::String` carrying an embedded NUL
+    /// byte, which `obj_core::index::encode_field` rejects) surfaces
+    /// as [`obj_core::Error::InvalidArgument`] from those terminal
+    /// calls.
+    #[must_use]
+    pub fn index_range<R>(mut self, name: &str, range: R) -> Self
     where
-        R: RangeBounds<Dynamic>,
+        R: crate::range::DynamicRange,
     {
-        let start = encode_bound(range.start_bound())?;
-        let end = encode_bound(range.end_bound())?;
+        let (start, end) = range.into_dynamic_bounds();
         self.source = Source::IndexRange {
             name: name.to_owned(),
             start,
             end,
         };
-        Ok(self)
+        self
     }
 
     /// Sort the result by `key`'s output in ascending key order.
@@ -263,6 +275,38 @@ where
         });
         self.sort_key = Some(encoded);
         self
+    }
+
+    /// Sort the result by `key`'s output, mapping each extracted key
+    /// through [`Into<Dynamic>`] internally.
+    ///
+    /// Ergonomic sibling of [`Query::sort_by`] for the common
+    /// scalar-field case: where `sort_by` makes the caller wrap the
+    /// field (`.sort_by(|o| Dynamic::U64(o.placed_at))`), `sort_by_key`
+    /// accepts any `K: Into<Dynamic>` and wraps it for them
+    /// (`.sort_by_key(|o| o.placed_at)`). The extracted key is run
+    /// through `.into()` and then forwarded onto the exact `sort_by`
+    /// path, so ordering, last-call-wins, sort-buffer bound, and the
+    /// fetch-time [`Error::SortKeyEncode`] behaviour are all identical
+    /// to `sort_by`.
+    ///
+    /// Use [`Query::sort_by`] when the key is already a `Dynamic`, or
+    /// [`Query::sort_by_bytes`] to supply pre-encoded sort bytes.
+    ///
+    /// # Errors at fetch time
+    ///
+    /// Same as [`Query::sort_by`] — see that method's docs.
+    ///
+    /// # Sort-buffer bound
+    ///
+    /// Same as [`Query::sort_by`] — see that method's docs.
+    #[must_use]
+    pub fn sort_by_key<K, F>(self, key: F) -> Self
+    where
+        F: Fn(&T) -> K + 'static,
+        K: Into<Dynamic>,
+    {
+        self.sort_by(move |doc| key(doc).into())
     }
 
     /// Sort the result by `key`'s raw byte output in ascending order.
@@ -365,12 +409,61 @@ where
         })
     }
 
+    /// Execute the query and return the first matching document, or
+    /// `None` when nothing matches.
+    ///
+    /// Sugar for `.limit(1).fetch()?.into_iter().next()`: it forces an
+    /// internal `.limit(1)` and reuses the [`Query::fetch`] decode path
+    /// — there is no second scan route. All previously-configured
+    /// filters, [`Query::index_range`], and [`Query::sort_by`] are
+    /// honoured. With a sort key set the buffer is filled, sorted, then
+    /// truncated to one, so "first" is the smallest by the sort key;
+    /// without one, "first" is the first in source order (primary `Id`
+    /// for a full scan, index-key bytes for an `index_range`).
+    ///
+    /// A previously-set `.limit(N)` is overridden — `first` returns at
+    /// most one document by construction.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() -> obj::Result<()> {
+    /// use obj::Db;
+    /// use serde::{Deserialize, Serialize};
+    ///
+    /// #[derive(Debug, Serialize, Deserialize, obj::Document)]
+    /// #[obj(collection = "orders_first_doc")]
+    /// struct Order { customer_id: u64 }
+    ///
+    /// let dir = tempfile::tempdir()?;
+    /// let db = Db::open(dir.path().join("first.obj"))?;
+    /// for i in 0..5u64 {
+    ///     let _ = db.insert(Order { customer_id: i })?;
+    /// }
+    /// let one: Option<Order> = db
+    ///     .query::<Order>()
+    ///     .filter(|o| o.customer_id == 3)
+    ///     .first()?;
+    /// assert_eq!(one.map(|o| o.customer_id), Some(3));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`Query::fetch`].
+    pub fn first(self) -> Result<Option<T>> {
+        Ok(self.limit(1).fetch()?.into_iter().next())
+    }
+
     /// Count the documents this query would return, ignoring
     /// [`Query::sort_by`] (sort does not change the count) but
     /// honouring [`Query::limit`] (returns `min(total, limit)`).
     ///
-    /// Takes `&self` rather than consuming the builder so callers
-    /// can chain a follow-up `.fetch()` on the same predicate set.
+    /// Consumes the builder, matching [`Query::fetch`] and the async
+    /// `AsyncQuery::count` — a query builder is single-shot. Rebuild
+    /// (or `.clone()` the predicate set, if your filters allow it) to
+    /// run a follow-up `.fetch()` on the same predicates.
     ///
     /// # Fast path (no filter set)
     ///
@@ -434,7 +527,7 @@ where
     /// - Any error from the underlying [`crate::Collection`] scan.
     /// - [`obj_core::Error::DistinctCountExceeded`] on the `Each`
     ///   fast path.
-    pub fn count(&self) -> Result<u64> {
+    pub fn count(self) -> Result<u64> {
         #[cfg(feature = "tracing")]
         let span = tracing::debug_span!("query.execute", kind = tracing::field::Empty);
         #[cfg(feature = "tracing")]
@@ -446,7 +539,7 @@ where
             let total = if self.filters.is_empty() {
                 count_fast(&coll, &self.source)?
             } else {
-                count_slow(&coll, self)?
+                count_slow(&coll, &self)?
             };
             Ok(apply_count_limit(total, self.limit))
         })
@@ -569,7 +662,9 @@ where
             }
         }
         Source::IndexRange { name, start, end } => {
-            let iter = coll.index_range_encoded(name, clone_bound(start), clone_bound(end))?;
+            let start = encode_bound(start.as_ref())?;
+            let end = encode_bound(end.as_ref())?;
+            let iter = coll.index_range_encoded(name, start, end)?;
             for step in iter {
                 let (_key, doc) = step?;
                 if !f(doc)? {
@@ -598,10 +693,12 @@ where
         Source::Full => coll.count_all(),
         Source::IndexRange { name, start, end } => {
             let kind = coll.index_kind(name)?;
+            let start = encode_bound(start.as_ref())?;
+            let end = encode_bound(end.as_ref())?;
             if kind == obj_core::IndexKind::Each {
-                coll.count_distinct_ids_in_range_encoded(name, clone_bound(start), clone_bound(end))
+                coll.count_distinct_ids_in_range_encoded(name, start, end)
             } else {
-                coll.count_index_range_encoded(name, clone_bound(start), clone_bound(end))
+                coll.count_index_range_encoded(name, start, end)
             }
         }
     }
@@ -630,7 +727,10 @@ where
 }
 
 /// Encode a `Bound<Dynamic>` into a `Bound<Vec<u8>>` using the
-/// order-preserving field encoder. Used by [`Query::index_range`].
+/// order-preserving field encoder. Run at terminal time
+/// (`fetch` / `count`) so [`Query::index_range`] can stay infallible;
+/// an unencodable bound surfaces here as the terminal `Result`'s
+/// error.
 fn encode_bound(b: Bound<&Dynamic>) -> Result<Bound<Vec<u8>>> {
     match b {
         Bound::Included(v) => Ok(Bound::Included(
@@ -640,16 +740,5 @@ fn encode_bound(b: Bound<&Dynamic>) -> Result<Bound<Vec<u8>>> {
             obj_core::index::encode_field(v)?.into_bytes(),
         )),
         Bound::Unbounded => Ok(Bound::Unbounded),
-    }
-}
-
-/// Clone a borrowed `Bound<Vec<u8>>` into an owned `Bound<Vec<u8>>`.
-/// Used by [`fetch_index_range`] to hand the bounds to the
-/// `Collection::index_range` API (which takes ownership).
-fn clone_bound(b: &Bound<Vec<u8>>) -> Bound<Vec<u8>> {
-    match b {
-        Bound::Included(v) => Bound::Included(v.clone()),
-        Bound::Excluded(v) => Bound::Excluded(v.clone()),
-        Bound::Unbounded => Bound::Unbounded,
     }
 }

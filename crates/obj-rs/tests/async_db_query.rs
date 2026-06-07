@@ -622,6 +622,57 @@ async fn query_sort_by_with_nul_string_returns_sort_key_encode_error() -> obj::R
 }
 
 // ===========================================================================
+// AsyncQuery: first terminal
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn query_first_returns_some_and_none() -> obj::Result<()> {
+    let db = AsyncDb::memory().await?;
+    seed_orders(&db, 10).await?;
+    // Non-empty: filter to "shipped" (odd placed_at); smallest id is 1.
+    let some: Option<Order> = db
+        .query::<Order>()
+        .filter(|o| o.status == "shipped")
+        .first()
+        .await?;
+    assert_eq!(some.map(|o| o.customer_id), Some(1));
+    // Empty result → None.
+    let none: Option<Order> = db
+        .query::<Order>()
+        .filter(|o| o.status == "archived")
+        .first()
+        .await?;
+    assert!(none.is_none(), "no doc has status 'archived'");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn query_first_respects_sort_order() -> obj::Result<()> {
+    let db = AsyncDb::memory().await?;
+    // Insert in reverse so source order and sort order disagree.
+    for i in (0..10u64).rev() {
+        let _ = db
+            .insert(Order {
+                customer_id: i,
+                status: "pending".to_owned(),
+                placed_at: i,
+            })
+            .await?;
+    }
+    let first: Option<Order> = db
+        .query::<Order>()
+        .sort_by(|o| Dynamic::U64(o.placed_at))
+        .first()
+        .await?;
+    assert_eq!(
+        first.map(|o| o.placed_at),
+        Some(0),
+        "ascending sort_by makes the smallest placed_at first"
+    );
+    Ok(())
+}
+
+// ===========================================================================
 // AsyncQuery: Debug impl smoke-test
 // ===========================================================================
 

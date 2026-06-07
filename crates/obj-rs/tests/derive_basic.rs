@@ -324,6 +324,43 @@ fn short_composite_attr_round_trips_through_db() {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, obj::Document)]
+#[obj(index = ("a", "b"), name = "by_a_b")]
+struct ShortCompositeNamed {
+    a: u32,
+    b: u32,
+}
+
+#[test]
+fn short_composite_attr_accepts_custom_name() {
+    let specs = <ShortCompositeNamed as Document>::indexes();
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].name, "by_a_b");
+    assert_eq!(specs[0].kind, IndexKind::Composite);
+    assert_eq!(specs[0].key_paths, vec!["a".to_owned(), "b".to_owned()]);
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, obj::Document)]
+#[obj(index = ("a", "b"), name = "by_a_b")]
+#[obj(index = ("b", "c"))]
+struct TwoShortCompositesOneNamed {
+    a: u32,
+    b: u32,
+    c: u32,
+}
+
+#[test]
+fn short_composite_custom_name_is_per_attribute() {
+    let specs = <TwoShortCompositesOneNamed as Document>::indexes();
+    assert_eq!(specs.len(), 2);
+    // The `name` binds only to the `index` in its own `#[obj(...)]`;
+    // the second composite keeps the default joined name.
+    assert_eq!(specs[0].name, "by_a_b");
+    assert_eq!(specs[0].key_paths, vec!["a".to_owned(), "b".to_owned()]);
+    assert_eq!(specs[1].name, "b__c");
+    assert_eq!(specs[1].key_paths, vec!["b".to_owned(), "c".to_owned()]);
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, obj::Document)]
 #[obj(index = ("a", "b"))]
 #[obj(index = ("b", "c"))]
 struct TwoShortComposites {

@@ -162,12 +162,59 @@ fn query_index_range_walks_index_slice() {
                 Bound::Included(Dynamic::U64(40)),
                 Bound::Excluded(Dynamic::U64(60)),
             ),
-        )
-        .expect("index_range")
-        .fetch()
+        )        .fetch()
         .expect("index_range fetch");
     assert_eq!(mid.len(), 20);
     assert!(mid.iter().all(|o| (40..60).contains(&o.placed_at)));
+}
+
+/// A scalar-typed range (`40u64..60`) must yield byte-for-byte the
+/// same documents as the equivalent explicitly-`Dynamic`-wrapped
+/// bound tuple — the ergonomic form is pure sugar over the same
+/// encoding. Exercises the sync query path, the `Collection`
+/// range/count APIs, and the `..=` / open-ended forms.
+#[test]
+fn query_index_range_scalar_matches_dynamic_wrapped() {
+    let (db, _dir) = fresh_db();
+    seed_orders(&db, 100);
+
+    let wrapped: Vec<Order> = db
+        .query::<Order>()
+        .index_range(
+            "placed_at",
+            (
+                Bound::Included(Dynamic::U64(40)),
+                Bound::Excluded(Dynamic::U64(60)),
+            ),
+        )
+        .fetch()
+        .expect("wrapped fetch");
+
+    let scalar: Vec<Order> = db
+        .query::<Order>()
+        .index_range("placed_at", 40u64..60)
+        .fetch()
+        .expect("scalar fetch");
+
+    assert_eq!(scalar, wrapped, "scalar range must equal Dynamic-wrapped");
+    assert_eq!(scalar.len(), 20);
+
+    // Inclusive scalar form covers one extra row at the top end.
+    let inclusive: Vec<Order> = db
+        .query::<Order>()
+        .index_range("placed_at", 40u64..=60)
+        .fetch()
+        .expect("inclusive fetch");
+    assert_eq!(inclusive.len(), 21);
+
+    // Collection-level APIs accept the same scalar range.
+    let entries = db
+        .read_transaction(|txn| {
+            let coll = txn.collection::<Order>()?;
+            coll.count_index_range("placed_at", 40u64..60)
+        })
+        .expect("count_index_range");
+    assert_eq!(entries, 20);
 }
 
 #[test]
@@ -182,9 +229,7 @@ fn query_index_range_empty_window_is_empty() {
                 Bound::Included(Dynamic::U64(1_000)),
                 Bound::Excluded(Dynamic::U64(2_000)),
             ),
-        )
-        .expect("index_range")
-        .fetch()
+        )        .fetch()
         .expect("index_range fetch");
     assert!(empty.is_empty());
 }
@@ -202,11 +247,88 @@ fn query_index_range_with_filter() {
                 Bound::Excluded(Dynamic::U64(30)),
             ),
         )
-        .expect("index_range")
         .filter(|o| o.status == "pending")
         .fetch()
         .expect("fetch");
     assert_eq!(hits.len(), 10);
+}
+
+/// `Query::index_range` returns `Self`, not `Result<Self>`, so the
+/// fluent chain needs no mid-chain `?` / `.expect(...)` — it composes
+/// with `.filter(...)` and `.fetch()` exactly like every other builder
+/// step. This is the ergonomic win issue #7 delivers.
+#[test]
+fn index_range_is_infallible_and_chains_fluently() {
+    let (db, _dir) = fresh_db();
+    seed_orders(&db, 100);
+    let mid: Vec<Order> = db
+        .query::<Order>()
+        .index_range("placed_at", 40u64..60)
+        .filter(|o| o.placed_at % 2 == 0)
+        .fetch()
+        .expect("fetch");
+    assert_eq!(mid.len(), 10, "even placed_at in [40, 60) is 40,42,..,58");
+}
+
+/// Deferred-error path: an unencodable bound (a `Dynamic::String`
+/// carrying an embedded NUL, which the order-preserving encoder
+/// rejects) does NOT fail at the infallible `.index_range(...)` step.
+/// The encode runs at terminal time, so the error surfaces from
+/// `.fetch()`.
+#[test]
+fn index_range_unencodable_bound_surfaces_err_from_fetch() {
+    let (db, _dir) = fresh_db();
+    for _ in 0..3 {
+        let _ = db
+            .insert(Ticket {
+                status: "urgent".to_owned(),
+            })
+            .expect("insert");
+    }
+    // The builder step itself succeeds — no `?` here.
+    let q = db.query::<Ticket>().index_range(
+        "by_status",
+        (
+            Bound::Included(Dynamic::String("has\0nul".to_owned())),
+            Bound::Unbounded,
+        ),
+    );
+    let err = q
+        .fetch()
+        .expect_err("embedded NUL must be rejected at fetch time");
+    assert!(
+        matches!(err, obj::Error::InvalidArgument(_)),
+        "expected InvalidArgument from deferred encode, got {err:?}",
+    );
+}
+
+/// Same deferred-error contract for the `.count()` terminal: the
+/// encode error fires from `count()`, not from `index_range`.
+#[test]
+fn index_range_unencodable_bound_surfaces_err_from_count() {
+    let (db, _dir) = fresh_db();
+    for _ in 0..3 {
+        let _ = db
+            .insert(Ticket {
+                status: "urgent".to_owned(),
+            })
+            .expect("insert");
+    }
+    let err = db
+        .query::<Ticket>()
+        .index_range(
+            "by_status",
+            (
+                Bound::Included(Dynamic::String("has\0nul".to_owned())),
+                Bound::Unbounded,
+            ),
+        )
+        .count()
+        .expect_err("embedded NUL must be rejected at count time");
+    assert!(
+        matches!(err, obj::Error::InvalidArgument(_)),
+        "expected InvalidArgument from deferred encode, got {err:?}",
+    );
 }
 
 /// Seed docs whose `placed_at` is the REVERSE of insertion order so
@@ -244,6 +366,26 @@ fn query_sort_by_int_field_ascends() {
     }
     assert_eq!(sorted[0].placed_at, 0);
     assert_eq!(sorted[99].placed_at, 99);
+}
+
+#[test]
+fn query_sort_by_key_matches_sort_by_dynamic() {
+    let (db, _dir) = fresh_db();
+    seed_reversed(&db, 100);
+    let via_key: Vec<Order> = db
+        .query::<Order>()
+        .sort_by_key(|o| o.placed_at)
+        .fetch()
+        .expect("sort_by_key fetch");
+    let via_dynamic: Vec<Order> = db
+        .query::<Order>()
+        .sort_by(|o| Dynamic::U64(o.placed_at))
+        .fetch()
+        .expect("sort_by fetch");
+    assert_eq!(
+        via_key, via_dynamic,
+        "sort_by_key(|o| o.placed_at) must order identically to sort_by(|o| Dynamic::U64(o.placed_at))",
+    );
 }
 
 #[test]
@@ -365,6 +507,8 @@ fn query_count_with_sort_and_limit_matches_filtered_total_min_limit() {
 fn query_count_can_be_called_then_fetch_via_separate_builders() {
     let (db, _dir) = fresh_db();
     seed_orders(&db, 10);
+    // `count` consumes its builder (like `fetch` and async `count`), so
+    // a follow-up `fetch` runs on a freshly built, separate builder.
     let q = db.query::<Order>().filter(|o| o.placed_at >= 5);
     let n = q.count().expect("count");
     assert_eq!(n, 5);
@@ -374,7 +518,6 @@ fn query_count_can_be_called_then_fetch_via_separate_builders() {
         .fetch()
         .expect("fetch");
     assert_eq!(docs.len() as u64, n);
-    drop(q);
 }
 
 #[test]
@@ -389,9 +532,7 @@ fn query_count_index_range_fast_path() {
                 Bound::Included(Dynamic::U64(30)),
                 Bound::Excluded(Dynamic::U64(70)),
             ),
-        )
-        .expect("index_range")
-        .count()
+        )        .count()
         .expect("count");
     assert_eq!(n, 40, "[30, 70) covers 40 docs");
 }
@@ -406,6 +547,59 @@ fn query_count_empty_collection_is_collection_not_found() {
     assert!(
         matches!(err, obj::Error::CollectionNotFound { ref name } if name == "orders"),
         "expected CollectionNotFound, got {err:?}",
+    );
+}
+
+#[test]
+fn query_first_returns_some_first_in_source_order() {
+    let (db, _dir) = fresh_db();
+    seed_orders(&db, 10);
+    let first: Option<Order> = db.query::<Order>().first().expect("first");
+    // No sort: source order is primary Id, i.e. insertion order, so
+    // the first inserted (customer_id 0) wins.
+    assert_eq!(first.map(|o| o.customer_id), Some(0));
+}
+
+#[test]
+fn query_first_with_filter_returns_first_match() {
+    let (db, _dir) = fresh_db();
+    seed_orders(&db, 10);
+    let first: Option<Order> = db
+        .query::<Order>()
+        .filter(|o| o.status == "shipped")
+        .first()
+        .expect("first");
+    // Odd-indexed docs are "shipped"; the smallest such id is 1.
+    assert_eq!(first.map(|o| o.customer_id), Some(1));
+}
+
+#[test]
+fn query_first_on_empty_result_is_none() {
+    let (db, _dir) = fresh_db();
+    seed_orders(&db, 5);
+    let none: Option<Order> = db
+        .query::<Order>()
+        .filter(|o| o.status == "archived")
+        .first()
+        .expect("first");
+    assert!(none.is_none(), "no doc has status 'archived'");
+}
+
+#[test]
+fn query_first_respects_sort_order() {
+    let (db, _dir) = fresh_db();
+    // placed_at is the REVERSE of insertion order, so source order and
+    // sort order disagree — the sort must decide which row is "first".
+    seed_reversed(&db, 100);
+    let first: Option<Order> = db
+        .query::<Order>()
+        .sort_by(|o| Dynamic::U64(o.placed_at))
+        .first()
+        .expect("first");
+    assert_eq!(
+        first.map(|o| o.placed_at),
+        Some(0),
+        "ascending sort_by makes the smallest placed_at first",
     );
 }
 
@@ -610,9 +804,7 @@ fn query_count_uses_distinct_path_for_each_index() {
         .index_range(
             "by_tag",
             Dynamic::from("urgent".to_owned())..=Dynamic::from("urgent".to_owned()),
-        )
-        .expect("index_range")
-        .count()
+        )        .count()
         .expect("count");
     assert_eq!(
         n, 3,
@@ -624,9 +816,7 @@ fn query_count_uses_distinct_path_for_each_index() {
         .index_range(
             "by_tag",
             Dynamic::from("urgent".to_owned())..=Dynamic::from("urgent".to_owned()),
-        )
-        .expect("index_range")
-        .fetch()
+        )        .fetch()
         .expect("fetch");
     assert_eq!(docs.len() as u64, n);
 }
@@ -820,9 +1010,7 @@ fn standard_index_inclusive_equality_matches_all_entries() {
         .index_range(
             "by_status",
             Dynamic::from("urgent".to_owned())..=Dynamic::from("urgent".to_owned()),
-        )
-        .expect("index_range")
-        .fetch()
+        )        .fetch()
         .expect("fetch");
     assert_eq!(hits.len(), 3, "all 3 'urgent' docs must match");
     assert!(hits.iter().all(|t| t.status == "urgent"));
@@ -846,9 +1034,7 @@ fn each_index_inclusive_equality_matches_all_entries() {
         .index_range(
             "by_tag",
             Dynamic::from("urgent".to_owned())..=Dynamic::from("urgent".to_owned()),
-        )
-        .expect("index_range")
-        .fetch()
+        )        .fetch()
         .expect("fetch");
     assert_eq!(hits.len(), 2, "both 'urgent'-tagged docs must match");
 }
@@ -878,9 +1064,7 @@ fn excluded_lower_skips_user_key_entries_inclusive_upper_matches() {
                 Bound::Excluded(Dynamic::from("a".to_owned())),
                 Bound::Included(Dynamic::from("b".to_owned())),
             ),
-        )
-        .expect("index_range")
-        .fetch()
+        )        .fetch()
         .expect("fetch");
     assert_eq!(hits.len(), 3, "only the 3 'b' docs match");
     assert!(hits.iter().all(|t| t.status == "b"));
@@ -918,9 +1102,7 @@ fn unique_inclusive_equality_still_matches_single_entry() {
             "by_email",
             Dynamic::from("ada@example.com".to_owned())
                 ..=Dynamic::from("ada@example.com".to_owned()),
-        )
-        .expect("index_range")
-        .fetch()
+        )        .fetch()
         .expect("fetch");
     assert_eq!(hits.len(), 1, "Unique single-key inclusive range matches");
     assert_eq!(hits[0].email, "ada@example.com");

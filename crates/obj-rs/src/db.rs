@@ -547,6 +547,21 @@ impl Db {
     /// entry but in-flight reads complete against their pinned
     /// snapshot.
     ///
+    /// # Choosing a receiver
+    ///
+    /// This `&mut self` form and the `&self`
+    /// [`attach_shared`](Self::attach_shared) do the **same work** —
+    /// the attachment registry is interior-mutable and mutex-guarded,
+    /// so neither receiver is "more correct" at the storage layer. The
+    /// `&mut self` here is about *exclusivity*, not necessity: prefer
+    /// it when you own the `Db` outright, because an exclusive borrow
+    /// is the clearest way to say "nothing else is touching this `Db`
+    /// while I attach." Use [`attach_shared`](Self::attach_shared)
+    /// when the handle is shared and `&mut self` is unavailable —
+    /// most commonly an `Arc<Db>` cloned across threads. The same
+    /// split applies to [`detach`](Self::detach) /
+    /// [`detach_shared`](Self::detach_shared).
+    ///
     /// # Examples
     ///
     /// ```
@@ -611,6 +626,13 @@ impl Db {
     /// the database at `path` under `namespace` through `&self`, for
     /// callers that hold a shared handle (e.g. an `Arc<Db>`) and
     /// cannot obtain `&mut self`.
+    ///
+    /// **This is the form you need when the `Db` is behind an `Arc`**
+    /// (or any shared reference): an `Arc<Db>` hands out `&Db`, never
+    /// `&mut Db`, so [`Self::attach`] is simply not callable. The
+    /// receiver is the only difference between the two — see
+    /// [`attach`](Self::attach)'s *Choosing a receiver* section for
+    /// the full rationale.
     ///
     /// Behaviour is identical to [`Self::attach`]: the attachment
     /// registry is interior-mutable, guarded by the same per-`Db`
@@ -702,6 +724,11 @@ impl Db {
     /// in-flight read may still complete against its pinned
     /// snapshot.
     ///
+    /// This `&mut self` form mirrors [`Self::attach`]; when you hold
+    /// only a shared handle (e.g. an `Arc<Db>`), use the `&self`
+    /// [`detach_shared`](Self::detach_shared) instead. See
+    /// [`attach`](Self::attach)'s *Choosing a receiver* section.
+    ///
     /// # Errors
     ///
     /// - [`Error::CollectionNamespaceUnknown`] if `namespace` is
@@ -784,14 +811,16 @@ impl Db {
     /// // get returns Option<T>.
     /// let _maybe: Option<Order> = db.get::<Order>(id)?;
     ///
-    /// // update applies a closure in place.
-    /// db.update::<Order, _>(id, |o| {
+    /// // update applies a closure in place. Annotate the closure
+    /// // parameter (`|o: &mut Order|`) so `T` is inferred — no turbofish.
+    /// db.update(id, |o: &mut Order| {
     ///     o.status = "shipped".to_owned();
     /// })?;
     ///
     /// // upsert at a caller-supplied id (insert or replace).
-    /// let id2 = obj::Id::try_new(42)
-    ///     .ok_or(obj::Error::InvalidArgument("non-zero"))?;
+    /// // `Id::new` is the literal constructor; use `Id::try_new` for
+    /// // ids derived from runtime input.
+    /// let id2 = obj::Id::new(42);
     /// db.upsert::<Order>(id2, Order {
     ///     customer_id: 2,
     ///     total_cents: 999,
@@ -824,6 +853,41 @@ impl Db {
     }
 
     /// Update the document at `id` via the closure.
+    ///
+    /// # Choosing a call form
+    ///
+    /// `T` appears only behind the closure's `&mut T` parameter, so
+    /// the compiler has nothing in the value arguments to infer it
+    /// from. The low-friction form is to **annotate the closure
+    /// parameter** — `db.update(id, |o: &mut Order| …)` — and let
+    /// inference flow from there. Prefer this. The turbofish
+    /// `db.update::<Order, _>(id, …)` works too but is noisier: the
+    /// trailing `_` is the closure type you would rather not spell.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() -> obj::Result<()> {
+    /// use obj::Db;
+    /// use serde::{Deserialize, Serialize};
+    ///
+    /// #[derive(Debug, Clone, Serialize, Deserialize, obj::Document)]
+    /// struct Order { total_cents: u64, status: String }
+    ///
+    /// let dir = tempfile::tempdir()?;
+    /// let db = Db::open(dir.path().join("update.obj"))?;
+    /// let id = db.insert(Order { total_cents: 100, status: "pending".to_owned() })?;
+    ///
+    /// // Recommended: annotate the closure parameter; no turbofish.
+    /// db.update(id, |o: &mut Order| o.status = "shipped".to_owned())?;
+    ///
+    /// let after: Order = db
+    ///     .get::<Order>(id)?
+    ///     .ok_or(obj::Error::InvalidArgument("just updated"))?;
+    /// assert_eq!(after.status, "shipped");
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// # Errors
     ///
@@ -1237,10 +1301,33 @@ impl Db {
     /// lifetime; the borrow on `self` ends when the iterator is
     /// dropped.
     ///
-    /// Each `next` call yields `Result<(Id, T)>`. Per-doc decode
-    /// errors surface as `Some(Err(_))` rather than ending the
-    /// iteration; the caller decides whether to propagate or
-    /// continue.
+    /// # Why each item is a `Result`
+    ///
+    /// Iteration is *fallible per step*. The iterator decodes
+    /// documents lazily, one bounded batch at a time, so a
+    /// mid-iteration page read, B-tree descent, or codec decode can
+    /// fail long after construction already succeeded. Each `next`
+    /// therefore yields `Result<(Id, T)>` — a failure surfaces as
+    /// `Some(Err(_))` rather than ending the iteration, so the
+    /// caller decides whether to propagate or continue. The
+    /// canonical loop unwraps the per-step `Result` with `?` (which
+    /// is why the loop body, not the `for` binding, carries the
+    /// `(id, doc)` destructure):
+    ///
+    /// ```ignore
+    /// for step in db.iter_all::<Order>()? {
+    ///     let (id, doc) = step?; // propagate a mid-scan IO error
+    ///     // ... use `id` / `doc`
+    /// }
+    /// ```
+    ///
+    /// Contrast [`Db::all`], which is *eagerly* fallible: it drives
+    /// this iterator to exhaustion behind a single `?` and hands
+    /// back a plain `Vec<T>` with no per-element `Result` to unwrap.
+    /// Choose deliberately — prefer `all` when the collection fits
+    /// comfortably in memory and a one-shot fallible call reads
+    /// cleaner; prefer `iter_all` when peak memory must stay bounded
+    /// and you can handle (or `?`-propagate) a failure mid-scan.
     ///
     /// Peak memory does NOT scale with collection size — the
     /// iterator's internal buffer is fixed at
@@ -1323,7 +1410,10 @@ impl Db {
 /// Construction errors surface at the [`Db::iter_all`] call site;
 /// per-step errors (pager, B-tree, codec) surface as
 /// `Some(Err(_))` during iteration and do NOT terminate it — the
-/// caller decides whether to continue.
+/// caller decides whether to continue. Unwrap each step with `?`:
+/// `for step in iter { let (id, doc) = step?; }`. For the eager,
+/// single-`?` alternative that materialises a `Vec<T>` instead, see
+/// [`Db::all`].
 pub struct IterAll<'db, T> {
     /// Owns the snapshot pin for the iterator's lifetime.
     txn: ReadTxn<'db>,

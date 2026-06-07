@@ -31,10 +31,16 @@ fn main() -> obj::Result<()> {
     let dir = tempfile::tempdir()?;
     let db = Db::open(dir.path().join("app.obj"))?;
     let id = db.insert(Order { customer_id: 1, total_cents: 4_200 })?;
+
+    // `T` lives only behind the closure's `&mut T`, so annotate the
+    // parameter — `|o: &mut Order|` — and inference fills in the rest
+    // (no `db.update::<Order, _>(…)` turbofish needed).
+    db.update(id, |o: &mut Order| o.total_cents = 5_000)?;
+
     let back: Order = db
         .get::<Order>(id)?
         .ok_or(obj::Error::InvalidArgument("just inserted"))?;
-    assert_eq!(back.total_cents, 4_200);
+    assert_eq!(back.total_cents, 5_000);
     Ok(())
 }
 ```
@@ -42,6 +48,69 @@ fn main() -> obj::Result<()> {
 Collection name and schema version default to the type name and `1`; override
 with `#[obj(collection = "...", version = N)]`. See the crate docs for queries,
 indexes, transactions, and migrations.
+
+## Schema migrations
+
+Evolve a stored type by bumping its version; older records migrate to the
+current shape lazily, on read. For the common case — **adding fields** — you
+don't write the migration at all: add `#[obj(auto_migrate)]` and the derive
+generates it. Pre-existing fields carry over and new fields backfill with
+their `Default`, or with a per-field `#[obj(default = ...)]` override.
+
+```rust
+use serde::{Deserialize, Serialize};
+
+// v2 of a type first stored at v1: `tier` is new. Existing records carry
+// `name`/`email` over and backfill `tier` from `#[obj(default = ...)]`.
+#[derive(Debug, Serialize, Deserialize, obj::Document)]
+#[obj(version = 2, collection = "customers", auto_migrate)]
+struct Customer {
+    name: String,
+    email: String,
+    #[obj(default = "standard".to_owned())]
+    tier: String,
+}
+```
+
+When the backfill must read the old record — deriving the new field from an
+existing one — point the field at a function with `#[obj(default_with = ...)]`
+instead of a static expression. It fires on the same absent-field branch, is
+handed the old record plus the stored version, and may fail:
+
+```rust
+use obj::Dynamic;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize, obj::Document)]
+#[obj(version = 2, collection = "customers", auto_migrate)]
+struct Customer {
+    name: String,
+    email: String,
+    #[obj(default_with = tier_from_email)] // derived, not a constant
+    tier: String,
+}
+
+// fn(old: &Dynamic, from_version: u32) -> obj::Result<FieldTy>
+fn tier_from_email(old: &Dynamic, _from: u32) -> obj::Result<String> {
+    let email = old.get_str("email")?;
+    Ok(if email.ends_with("@bigcorp.com") {
+        "enterprise".to_owned()
+    } else {
+        "standard".to_owned()
+    })
+}
+```
+
+Because migration runs lazily on every read of an unmigrated record (the
+result is not written back), keep a `default_with` function pure and cheap —
+it's for values computable from the record, not for external I/O such as a
+network or database lookup.
+
+`auto_migrate` covers pure-additive changes only. Field removals, renames,
+type changes, and version-dependent backfills need a hand-written
+`Document::migrate` — including the recommended `From`-per-version pattern for
+chained `v1 → v2 → v3` upgrades. See the `obj-rs` crate docs ("Schema
+evolution") for both paths.
 
 ## Performance
 

@@ -8,6 +8,9 @@ rust-version.workspace = true
 repository.workspace = true
 authors.workspace = true
 homepage = "https://github.com/uname-n/libobj"
+# Distribution is git-based, not crates.io (path deps carry no version). A
+# release tool flips this and reintroduces versions at publish time.
+publish = false
 readme = "README.md"
 keywords = ["database", "embedded", "document", "acid", "storage"]
 categories = ["database", "database-implementations", "data-structures"]
@@ -75,6 +78,10 @@ harness = false
 
 [[bench]]
 name = "perf_table"
+harness = false
+
+[[bench]]
+name = "mem_off"
 harness = false
 
 [[bench]]

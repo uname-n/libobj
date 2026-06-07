@@ -7,14 +7,13 @@
 //! db.attach("archive.obj", "archive")?;
 //! let archived: Vec<Order> = db
 //!     .collection::<Order>("archive.orders")
-//!     .all()?
-//!     .collect();
+//!     .values()?;
 //! ```
 //!
-//! As with `design_md_queries::all_orders_iterates_every_doc`,
-//! `Collection::all` ships as an owned `Vec<(Id, T)>` shape; the test
-//! adapts the `.collect()` step to thread off the `Id` part exactly as
-//! a user would.
+//! `Collection::all` ships an owned `Vec<(Id, T)>` shape;
+//! `Collection::values` is the id-less convenience that mirrors
+//! `Db::all`, so the test reads the archived documents through it
+//! rather than threading off the `Id` part by hand.
 
 #![forbid(unsafe_code)]
 
@@ -73,11 +72,8 @@ fn design_md_attach_collection_reads_archived_orders() {
 
     let archived: Vec<Order> = db
         .collection::<Order>("archive.orders")
-        .all()
-        .expect("all on archive.orders")
-        .into_iter()
-        .map(|(_id, doc)| doc)
-        .collect();
+        .values()
+        .expect("values on archive.orders");
     assert_eq!(archived.len(), 2);
     let totals: Vec<u64> = archived.iter().map(|o| o.total_cents).collect();
     assert!(totals.contains(&100));

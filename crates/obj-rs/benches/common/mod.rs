@@ -25,7 +25,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use obj::{Db, Document, Id, Schema};
+use obj::{Config, Db, Document, Id, Schema, SyncMode};
 use tempfile::TempDir;
 
 /// RAII wrapper around a `(TempDir, Db)` pair. Field order matters:
@@ -58,6 +58,24 @@ pub fn fresh_db(name: &str) -> BenchDb {
     let path = tempdir.path().join(format!("{name}.obj"));
     let db = Db::open(&path).expect("open fresh db");
     BenchDb { db, path, tempdir }
+}
+
+/// Open a fresh **in-memory** `Db` configured with [`SyncMode::Off`] —
+/// the ephemeral, throughput-tuned scratch config: no persistence, no
+/// file locks, and no per-commit durability sync. This is the config
+/// the `mem_off` bench measures; the on-disk [`fresh_db`] (durable
+/// default `SyncMode::Full`) is what `perf_table` measures. Unlike
+/// [`fresh_db`] there is no path or `TempDir`, so this returns a bare
+/// [`Db`] rather than a [`BenchDb`].
+///
+/// # Panics
+///
+/// Panics if the in-memory open fails — bench setup is not a
+/// production path.
+#[must_use]
+pub fn fresh_mem_db() -> Db {
+    let cfg = Config::default().sync_mode(SyncMode::Off);
+    Db::memory_with(cfg).expect("open in-memory db")
 }
 
 /// Drop the supplied `Db` and re-open the same path, flushing the WAL

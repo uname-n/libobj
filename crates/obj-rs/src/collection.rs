@@ -655,10 +655,13 @@ impl<'tx, T: Document> Collection<'tx, T> {
     }
 
     /// Yield `(user_key, doc)` pairs whose index key falls within
-    /// `range`. The bounds are [`Dynamic`](obj_core::codec::Dynamic)
-    /// values — the same ergonomic type [`crate::Query::index_range`]
-    /// takes — encoded internally through the order-preserving field
-    /// encoder ([`obj_core::index::encode_field`]); callers no longer
+    /// `range`. The bounds may be any scalar that converts into a
+    /// [`Dynamic`](obj_core::codec::Dynamic) — see
+    /// [`DynamicRange`](crate::DynamicRange) — so `40u64..60` works
+    /// without `Dynamic::U64(..)` wrapping, the same ergonomics
+    /// [`crate::Query::index_range`] offers. The bounds are encoded
+    /// internally through the order-preserving field encoder
+    /// ([`obj_core::index::encode_field`]); callers no longer
     /// hand-encode index-key bytes.
     ///
     /// For non-Unique kinds (`Standard` / `Each` / `Composite`) the
@@ -680,11 +683,12 @@ impl<'tx, T: Document> Collection<'tx, T> {
         range: R,
     ) -> Result<IndexIter<'static, (Vec<u8>, T)>>
     where
-        R: std::ops::RangeBounds<obj_core::codec::Dynamic>,
+        R: crate::range::DynamicRange,
         T: Send + 'static,
     {
-        let start = encode_dynamic_bound(range.start_bound())?;
-        let end = encode_dynamic_bound(range.end_bound())?;
+        let (start, end) = range.into_dynamic_bounds();
+        let start = encode_dynamic_bound(start.as_ref())?;
+        let end = encode_dynamic_bound(end.as_ref())?;
         self.index_range_encoded(index_name, start, end)
     }
 
@@ -778,6 +782,67 @@ impl<'tx, T: Document> Collection<'tx, T> {
     /// short-circuit the second descent; that work is pinned to
     /// post-1.0.
     ///
+    /// # Why each item is a `Result`
+    ///
+    /// Iteration is *fallible per step*. The iterator walks the
+    /// index in bounded chunks and `get`s each document back
+    /// lazily, so a pager read, B-tree descent, or codec decode can
+    /// fail mid-scan — long after construction already succeeded.
+    /// Each `next` therefore yields `Result<(user_key, T)>`; the
+    /// canonical loop unwraps the per-step `Result` with `?`, which
+    /// is why the `(key, doc)` destructure lives in the loop body
+    /// rather than the `for` binding:
+    ///
+    /// ```ignore
+    /// for step in coll.iter_range("placed_at", 10u64..40)? {
+    ///     let (key, doc) = step?; // propagate a mid-scan IO error
+    ///     // ... use `key` / `doc`
+    /// }
+    /// ```
+    ///
+    /// Contrast the eager forms — [`Self::index_range`] (and the
+    /// whole-collection [`Self::all`]) materialise their matches and
+    /// surface IO failure through a single `?` at the call site
+    /// instead of once per element. Choose deliberately: the eager
+    /// call reads cleaner when the result set fits in memory; the
+    /// lazy iterator keeps peak memory bounded and lets you bail out
+    /// after the first row.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() -> obj::Result<()> {
+    /// use obj::{Db, Document};
+    /// use serde::{Deserialize, Serialize};
+    ///
+    /// #[derive(Debug, Serialize, Deserialize, obj::Document)]
+    /// #[obj(collection = "orders_iter_range_doc")]
+    /// struct Order {
+    ///     #[obj(index)]
+    ///     placed_at: u64,
+    ///     total_cents: u64,
+    /// }
+    ///
+    /// let dir = tempfile::tempdir()?;
+    /// let db = Db::open(dir.path().join("iter_range.obj"))?;
+    /// for i in 0..10u64 {
+    ///     let _ = db.insert(Order { placed_at: i, total_cents: i * 100 })?;
+    /// }
+    ///
+    /// // Stream the [3, 7) window, unwrapping each step with `?`.
+    /// let coll = db.collection::<Order>(Order::COLLECTION);
+    /// let mut total: u64 = 0;
+    /// for step in coll.iter_range("placed_at", 3u64..7)? {
+    ///     let (_key, doc) = step?;
+    ///     total = total
+    ///         .checked_add(doc.total_cents)
+    ///         .ok_or(obj::Error::InvalidArgument("overflow"))?;
+    /// }
+    /// assert_eq!(total, (300 + 400 + 500 + 600));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
     /// # Errors
     ///
     /// - [`Error::IndexNotFound`] if `index_name` is unknown / dropped.
@@ -785,11 +850,12 @@ impl<'tx, T: Document> Collection<'tx, T> {
     ///   and from each `next()` call.
     pub fn iter_range<'a, R>(&'a self, index_name: &str, range: R) -> Result<IterIndexRange<'a, T>>
     where
-        R: std::ops::RangeBounds<obj_core::codec::Dynamic>,
+        R: crate::range::DynamicRange,
         T: Send + 'static,
     {
-        let start_bound = encode_dynamic_bound(range.start_bound())?;
-        let end_bound = encode_dynamic_bound(range.end_bound())?;
+        let (start, end) = range.into_dynamic_bounds();
+        let start_bound = encode_dynamic_bound(start.as_ref())?;
+        let end_bound = encode_dynamic_bound(end.as_ref())?;
         self.iter_range_encoded(index_name, start_bound, end_bound)
     }
 
@@ -1088,10 +1154,11 @@ impl<'tx, T: Document> Collection<'tx, T> {
     /// - Pager / B-tree errors propagated.
     pub fn count_index_range<R>(&self, index_name: &str, range: R) -> Result<u64>
     where
-        R: std::ops::RangeBounds<obj_core::codec::Dynamic>,
+        R: crate::range::DynamicRange,
     {
-        let start = encode_dynamic_bound(range.start_bound())?;
-        let end = encode_dynamic_bound(range.end_bound())?;
+        let (start, end) = range.into_dynamic_bounds();
+        let start = encode_dynamic_bound(start.as_ref())?;
+        let end = encode_dynamic_bound(end.as_ref())?;
         self.count_index_range_encoded(index_name, start, end)
     }
 
@@ -1152,10 +1219,11 @@ impl<'tx, T: Document> Collection<'tx, T> {
     /// - Pager / B-tree errors propagated.
     pub fn count_distinct_ids_in_range<R>(&self, index_name: &str, range: R) -> Result<u64>
     where
-        R: std::ops::RangeBounds<obj_core::codec::Dynamic>,
+        R: crate::range::DynamicRange,
     {
-        let start = encode_dynamic_bound(range.start_bound())?;
-        let end = encode_dynamic_bound(range.end_bound())?;
+        let (start, end) = range.into_dynamic_bounds();
+        let start = encode_dynamic_bound(start.as_ref())?;
+        let end = encode_dynamic_bound(end.as_ref())?;
         self.count_distinct_ids_in_range_encoded(index_name, start, end)
     }
 
@@ -1197,6 +1265,14 @@ impl<'tx, T: Document> Collection<'tx, T> {
 
     /// Materialise every `(Id, T)` pair in the collection.
     ///
+    /// Use this when you need the [`Id`] alongside each document
+    /// (e.g. to re-`get`, update, or delete by id). If you only want
+    /// the documents, [`Self::values`] drops the id for you. The
+    /// `Db`-level counterpart, [`crate::Db::all`], is already
+    /// id-less — it materialises `Vec<T>` directly — so
+    /// `collection.values()` is the per-collection analogue of
+    /// `db.all()`, and `collection.all()` is the id-carrying form.
+    ///
     /// Implementation note: returns an owned `Vec` rather than a
     /// streaming iterator because the B+tree range API borrows the
     /// pager, and threading that borrow through the mutex guards
@@ -1234,6 +1310,22 @@ impl<'tx, T: Document> Collection<'tx, T> {
                 operation: "internal: lazy-mode all",
             }),
         }
+    }
+
+    /// Materialise every document in the collection, dropping the
+    /// [`Id`].
+    ///
+    /// Convenience over [`Self::all`] for the common case where the
+    /// id is not needed: `collection.values()` mirrors
+    /// [`crate::Db::all`]'s id-less `Vec<T>` shape, whereas
+    /// [`Self::all`] keeps the `(Id, T)` pair when you need to act on
+    /// documents by id.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::all`].
+    pub fn values(&self) -> Result<Vec<T>> {
+        Ok(self.all()?.into_iter().map(|(_id, doc)| doc).collect())
     }
 
     fn write_or_err(&self, op: &'static str) -> Result<&WriteRef<'tx>> {
@@ -1846,6 +1938,13 @@ enum StagedEntry<T> {
 /// to the lifetime of `Collection::iter_range`'s `&self` borrow), the
 /// index's root page-id, the dedup set for `Each` indexes, the next-
 /// chunk resumption marker, and the staged batch.
+///
+/// Items are `Result` because iteration is fallible per step — a
+/// pager read or codec decode can fail mid-scan, surfacing as
+/// `Some(Err(_))` without ending iteration. Unwrap each step with
+/// `?`: `for step in iter { let (key, doc) = step?; }`. For the
+/// eager, single-`?` alternative that materialises every match up
+/// front, see [`Collection::index_range`].
 pub struct IterIndexRange<'a, T: Document> {
     coll: &'a Collection<'a, T>,
     descriptor_kind: obj_core::IndexKind,

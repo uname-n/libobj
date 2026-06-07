@@ -14,7 +14,7 @@
 //! `blocking` pool.
 
 use std::marker::PhantomData;
-use std::ops::{Bound, RangeBounds};
+use std::ops::Bound;
 use std::sync::Arc;
 
 use obj_core::codec::Dynamic;
@@ -120,22 +120,23 @@ where
     /// Switch the source to a named index's range. See
     /// [`crate::Query::index_range`].
     ///
-    /// # Errors
+    /// # Deferred errors
     ///
-    /// As [`crate::Query::index_range`] — note that the underlying
-    /// encoder fires at `fetch` / `count` time rather than here,
-    /// because the async builder stores the structured `Dynamic`
-    /// bounds and forwards them onto the blocking `Query` inside the
-    /// blocking task.
+    /// Infallible — like the blocking [`crate::Query::index_range`],
+    /// the order-preserving encoder fires at `fetch` / `count` time,
+    /// not here: the builder stores the structured `Dynamic` bounds
+    /// and forwards them onto the blocking `Query` inside the blocking
+    /// task. An unencodable bound surfaces from `fetch` / `count`.
     #[must_use]
     pub fn index_range<R>(mut self, name: &str, range: R) -> Self
     where
-        R: RangeBounds<Dynamic>,
+        R: crate::range::DynamicRange,
     {
+        let (start, end) = range.into_dynamic_bounds();
         self.source = AsyncSource::IndexRange {
             name: name.to_owned(),
-            start: clone_dynamic_bound(range.start_bound()),
-            end: clone_dynamic_bound(range.end_bound()),
+            start,
+            end,
         };
         self
     }
@@ -150,6 +151,18 @@ where
     {
         self.sort_key = Some(SortKey::Dynamic(Box::new(key)));
         self
+    }
+
+    /// Sort by an extracted key, mapping it through [`Into<Dynamic>`].
+    /// See [`crate::Query::sort_by_key`]. Adds a `Send` bound to the
+    /// closure so it can ride the blocking-task hop.
+    #[must_use]
+    pub fn sort_by_key<K, F>(self, key: F) -> Self
+    where
+        F: Fn(&T) -> K + Send + 'static,
+        K: Into<Dynamic>,
+    {
+        self.sort_by(move |doc| key(doc).into())
     }
 
     /// Sort by raw bytes. See [`crate::Query::sort_by_bytes`].
@@ -193,10 +206,25 @@ where
                 limit,
                 sort_key,
                 sort_buffer_limit,
-            )?;
+            );
             q.fetch()
         })
         .await
+    }
+
+    /// Return the first matching document, or `None` when nothing
+    /// matches. Async mirror of [`crate::Query::first`].
+    ///
+    /// Forces an internal `.limit(1)` and reuses the async
+    /// [`AsyncQuery::fetch`] path — no second decode route. Filters,
+    /// `index_range`, and `sort_by` already configured are honoured;
+    /// with a sort key set "first" is the smallest by the sort key.
+    ///
+    /// # Errors
+    ///
+    /// As [`AsyncQuery::fetch`].
+    pub async fn first(self) -> Result<Option<T>> {
+        Ok(self.limit(1).fetch().await?.into_iter().next())
     }
 
     /// Count matching documents. See [`crate::Query::count`].
@@ -227,7 +255,7 @@ where
                 limit,
                 sort_key,
                 sort_buffer_limit,
-            )?;
+            );
             q.count()
         })
         .await
@@ -245,7 +273,7 @@ fn build_blocking_query<T>(
     limit: Option<usize>,
     sort_key: Option<SortKey<T>>,
     sort_buffer_limit: Option<usize>,
-) -> Result<crate::Query<'_, T>>
+) -> crate::Query<'_, T>
 where
     T: Document + Send + 'static,
 {
@@ -253,7 +281,7 @@ where
     match source {
         AsyncSource::Full => {}
         AsyncSource::IndexRange { name, start, end } => {
-            q = q.index_range(&name, (start, end))?;
+            q = q.index_range(&name, (start, end));
         }
     }
     for predicate in filters {
@@ -274,13 +302,5 @@ where
     if let Some(n) = sort_buffer_limit {
         q = q.sort_buffer_limit(n);
     }
-    Ok(q)
-}
-
-fn clone_dynamic_bound(b: Bound<&Dynamic>) -> Bound<Dynamic> {
-    match b {
-        Bound::Included(d) => Bound::Included(d.clone()),
-        Bound::Excluded(d) => Bound::Excluded(d.clone()),
-        Bound::Unbounded => Bound::Unbounded,
-    }
+    q
 }

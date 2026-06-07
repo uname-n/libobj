@@ -768,7 +768,7 @@ dependencies = [
 
 [[package]]
 name = "libobj"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cbindgen",
  "libc",
@@ -831,7 +831,7 @@ dependencies = [
 
 [[package]]
 name = "obj-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chacha20poly1305",
  "crc32c",
@@ -856,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "obj-derive"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -865,7 +865,7 @@ dependencies = [
 
 [[package]]
 name = "obj-rs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blocking",
  "criterion",

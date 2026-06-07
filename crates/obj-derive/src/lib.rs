@@ -30,17 +30,17 @@
 //! Struct-level composite (one or more occurrences compose, each
 //! adding one `Composite` `IndexSpec`):
 //!
-//! - `index_composite(fields = ("a", "b"), name = "by_a_b")` — emit a
-//!   `Composite` `IndexSpec` spanning the listed fields. `name`
-//!   defaults to the field names joined with `__`. The referenced
+//! - `index = ("a", "b")` — **canonical** composite form. Emits a
+//!   `Composite` `IndexSpec` spanning the listed fields. The referenced
 //!   fields must exist on the struct; fewer than two is a compile
-//!   error.
-//! - `index = ("a", "b")` — short form, equivalent to
-//!   `index_composite(fields = ("a", "b"))`. Same downstream
-//!   validation (≥ 2 fields, each declared on the struct). The
-//!   default index name is the fields joined with `__`; there is no
-//!   `name = "..."` slot on the short form — use `index_composite`
-//!   when a custom name is required. Both syntaxes coexist.
+//!   error. The default index name is the fields joined with `__`; an
+//!   optional sibling `name = "..."` in the same `#[obj(...)]`
+//!   overrides it, e.g. `#[obj(index = ("a", "b"), name = "by_a_b")]`.
+//! - `index_composite(fields = ("a", "b"), name = "by_a_b")` — older
+//!   long form, also accepted. Equivalent to the short form with the
+//!   same downstream validation (≥ 2 fields, each declared on the
+//!   struct); `name` likewise defaults to the fields joined with `__`.
+//!   Prefer the short `index = (...)` form in new code.
 //!
 //! Field-level (`#[obj(...)]` on a struct field):
 //!
@@ -78,6 +78,13 @@
 //!   supplies a custom backfill expression for a field added in this
 //!   version, used instead of `Default::default()` when the field is
 //!   absent from the older shape.
+//! - `default_with = <path>` (field-level) — paired with
+//!   `auto_migrate`, points a newly-added field at a backfill function
+//!   `fn(old: &Dynamic, from_version: u32) -> obj::Result<FieldTy>`.
+//!   The function receives the old record (so it can derive the new
+//!   value from any prior field) and the stored version, and may fail.
+//!   It fires on the same absent branch as `default`. `default` and
+//!   `default_with` on the same field is a compile error.
 //!
 //! The companion `impl ::obj::Schema` block's `schema()` body maps
 //! each field to a `DynamicSchema` variant. Scalar primitives
@@ -294,13 +301,15 @@ fn emit_schema_body_struct(input: &DeriveInput) -> syn::Result<proc_macro2::Toke
 ///   `Dynamic::deserialize` and propagated with `?` on a type / shape
 ///   mismatch.
 /// - **Absent** — the field was ADDED in this version; it backfills
-///   with the per-field `#[obj(default = <expr>)]` expression if one
-///   was supplied, otherwise `::core::default::Default::default()`.
+///   with the per-field `#[obj(default_with = <path>)]` function
+///   (`#path(&dynamic, _from_version)?`) if one was supplied, else the
+///   per-field `#[obj(default = <expr>)]` expression, else
+///   `::core::default::Default::default()`.
 ///
-/// `_from_version` is ignored: the additive case treats every older
-/// version identically (read what is there, default the rest). Types
-/// needing a non-`Default` backfill that varies by version, a field
-/// removal with side effects, or a type change must hand-write the
+/// `_from_version` is forwarded to any `default_with` function but is
+/// otherwise unused: the additive case treats every older version
+/// identically (read what is there, default the rest). Types needing a
+/// field removal with side effects or a type change must hand-write the
 /// full `impl Document` and override `migrate` themselves.
 fn emit_auto_migrate_body(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let fields = named_fields(input)?;
@@ -322,8 +331,11 @@ fn emit_auto_migrate_body(input: &DeriveInput) -> syn::Result<proc_macro2::Token
 
 /// Emit one `field: <expr>` initialiser for the auto-migrate `Self {
 /// ... }` literal. Reads the field from the `Dynamic::Map` by name,
-/// deserialising the present sub-value or falling back to the
-/// field's backfill expression when absent.
+/// deserialising the present sub-value or falling back to the field's
+/// backfill when absent. The absent-branch backfill is, in priority
+/// order: a `#[obj(default_with = <path>)]` function applied to the old
+/// record (`#path(&dynamic, _from_version)?`), a `#[obj(default =
+/// <expr>)]` static expression, or `Default::default()`.
 fn emit_auto_migrate_field(field: &Field) -> syn::Result<proc_macro2::TokenStream> {
     let ident = field
         .ident
@@ -331,8 +343,11 @@ fn emit_auto_migrate_field(field: &Field) -> syn::Result<proc_macro2::TokenStrea
         .ok_or_else(|| syn::Error::new(field.span(), "expected named field"))?;
     let name = ident.to_string();
     let ty = &field.ty;
-    let backfill = field_default_expr(field)?
-        .unwrap_or_else(|| quote! { ::core::default::Default::default() });
+    let backfill = match field_backfill(field)? {
+        Some(Backfill::Expr(ts)) => ts,
+        Some(Backfill::With(path)) => quote! { #path(&dynamic, _from_version)? },
+        None => quote! { ::core::default::Default::default() },
+    };
     Ok(quote! {
         #ident: match ::obj::Dynamic::get(&dynamic, #name) {
             ::std::option::Option::Some(__obj_v) => {
@@ -343,32 +358,60 @@ fn emit_auto_migrate_field(field: &Field) -> syn::Result<proc_macro2::TokenStrea
     })
 }
 
-/// Parse a field-level `#[obj(default = <expr>)]` backfill override.
+/// A per-field backfill source for the absent (newly-added-field)
+/// branch of an `auto_migrate`-generated `migrate`.
+enum Backfill {
+    /// `#[obj(default = <expr>)]` — a static expression with no access
+    /// to the migrating record; emitted verbatim.
+    Expr(proc_macro2::TokenStream),
+    /// `#[obj(default_with = <path>)]` — a function
+    /// `fn(old: &Dynamic, from_version: u32) -> obj::Result<FieldTy>`
+    /// that receives the old record and the stored version, so the
+    /// backfill can read any prior field and may fail. Emitted as
+    /// `#path(&dynamic, _from_version)?`.
+    With(syn::Path),
+}
+
+/// Parse a field-level `#[obj(default = <expr>)]` /
+/// `#[obj(default_with = <path>)]` backfill override.
 ///
-/// Returns the user-supplied expression token stream, or `None` when
-/// the field carries no `default` key (the caller then uses
-/// `Default::default()`). A `default` key declared twice on one field
-/// is a compile error.
-fn field_default_expr(field: &Field) -> syn::Result<Option<proc_macro2::TokenStream>> {
-    let mut expr: Option<proc_macro2::TokenStream> = None;
+/// Returns the parsed [`Backfill`], or `None` when the field carries
+/// neither key (the caller then uses `Default::default()`). `default`
+/// supplies a static expression; `default_with` supplies a function
+/// applied to the old record. Either key declared twice, or `default`
+/// and `default_with` declared on the **same field**, is a compile
+/// error.
+fn field_backfill(field: &Field) -> syn::Result<Option<Backfill>> {
+    let mut backfill: Option<Backfill> = None;
     for attr in &field.attrs {
         if !attr.path().is_ident("obj") {
             continue;
         }
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("default") {
-                if expr.is_some() {
-                    return Err(meta.error("`default` declared twice on the same field"));
+                if backfill.is_some() {
+                    return Err(meta.error(
+                        "`default` / `default_with` declared twice on the same field",
+                    ));
                 }
-                let value = meta.value()?;
-                let parsed: syn::Expr = value.parse()?;
-                expr = Some(quote! { #parsed });
+                let parsed: syn::Expr = meta.value()?.parse()?;
+                backfill = Some(Backfill::Expr(quote! { #parsed }));
+                return Ok(());
+            }
+            if meta.path.is_ident("default_with") {
+                if backfill.is_some() {
+                    return Err(meta.error(
+                        "`default` / `default_with` declared twice on the same field",
+                    ));
+                }
+                let path: syn::Path = meta.value()?.parse()?;
+                backfill = Some(Backfill::With(path));
                 return Ok(());
             }
             skip_unrelated_field_meta(&meta)
         })?;
     }
-    Ok(expr)
+    Ok(backfill)
 }
 
 /// Consume (and ignore) the payload of a field-`#[obj(...)]` key that
@@ -648,8 +691,9 @@ struct StructAttrs {
     /// field is read from the older record's `Dynamic::Map` by name;
     /// fields present in the old shape carry over, fields absent from
     /// it (added in this version) fall back to `Default::default()` (or
-    /// a per-field `#[obj(default = <expr>)]` backfill). Struct-only;
-    /// declared twice is a compile error.
+    /// a per-field `#[obj(default = <expr>)]` /
+    /// `#[obj(default_with = <path>)]` backfill). Struct-only; declared
+    /// twice is a compile error.
     auto_migrate: bool,
 }
 
@@ -670,9 +714,14 @@ fn parse_struct_attrs(input: &DeriveInput) -> syn::Result<StructAttrs> {
 /// Parse a single `#[obj(...)]` attribute into `acc`. Duplicate
 /// scalar keys (within this attribute OR already present in `acc`)
 /// error; `index_composite(...)` is non-scalar and appends new
-/// entries. The removed `history(...)` key is rejected with a
-/// migration-pointing diagnostic.
+/// entries. A short-form `index = (...)` and its optional sibling
+/// `name = "..."` are accumulated locally and merged once the whole
+/// attribute has parsed (see [`apply_struct_index_name`]). The removed
+/// `history(...)` key is rejected with a migration-pointing
+/// diagnostic.
 fn parse_one_struct_attr(attr: &Attribute, acc: &mut StructAttrs) -> syn::Result<()> {
+    let mut short: Option<CompositeAttr> = None;
+    let mut short_name: Option<LitStr> = None;
     attr.parse_nested_meta(|meta| {
         if meta.path.is_ident("version") {
             return parse_struct_version(&meta, acc);
@@ -686,8 +735,17 @@ fn parse_one_struct_attr(attr: &Attribute, acc: &mut StructAttrs) -> syn::Result
             return Ok(());
         }
         if meta.path.is_ident("index") {
-            let composite = parse_struct_index_short(&meta)?;
-            acc.composites.push(composite);
+            if short.is_some() {
+                return Err(meta.error("`index` declared twice in one #[obj(...)]"));
+            }
+            short = Some(parse_struct_index_short(&meta)?);
+            return Ok(());
+        }
+        if meta.path.is_ident("name") {
+            if short_name.is_some() {
+                return Err(meta.error("`name` declared twice"));
+            }
+            short_name = Some(meta.value()?.parse()?);
             return Ok(());
         }
         if meta.path.is_ident("history") {
@@ -713,7 +771,42 @@ fn parse_one_struct_attr(attr: &Attribute, acc: &mut StructAttrs) -> syn::Result
         Err(meta.error(
             "unknown obj attribute (expected `version`, `collection`, `index`, `index_composite`, `schema`, or `auto_migrate`)",
         ))
-    })
+    })?;
+    apply_struct_index_name(acc, short, short_name)
+}
+
+/// Merge an optional struct-level `name = "..."` into the short-form
+/// `index = (...)` parsed from the same `#[obj(...)]` attribute, then
+/// push the resulting [`CompositeAttr`]. An empty name is rejected
+/// (mirroring `index_composite(name = "...")`), and a `name` with no
+/// accompanying short `index` in the same attribute is an error —
+/// `name` at struct level only ever qualifies a short composite index.
+fn apply_struct_index_name(
+    acc: &mut StructAttrs,
+    short: Option<CompositeAttr>,
+    short_name: Option<LitStr>,
+) -> syn::Result<()> {
+    match (short, short_name) {
+        (Some(mut composite), name) => {
+            if let Some(lit) = name {
+                let s = lit.value();
+                if s.is_empty() {
+                    return Err(syn::Error::new(
+                        lit.span(),
+                        "composite index name must not be empty",
+                    ));
+                }
+                composite.custom_name = Some(s);
+            }
+            acc.composites.push(composite);
+            Ok(())
+        }
+        (None, Some(lit)) => Err(syn::Error::new(
+            lit.span(),
+            "struct-level `name = \"...\"` requires an `index = (...)` in the same #[obj(...)]",
+        )),
+        (None, None) => Ok(()),
+    }
 }
 
 /// Parse the short composite-index form `#[obj(index = ("a", "b"))]`
@@ -722,10 +815,13 @@ fn parse_one_struct_attr(attr: &Attribute, acc: &mut StructAttrs) -> syn::Result
 /// shapes and yield a struct-level diagnostic that points back at
 /// `index_composite` / field-level placement.
 ///
-/// The returned [`CompositeAttr`] is validated downstream by
-/// [`validate_and_lift_composites`], which already enforces the
-/// `≥ 2 fields` and "field declared on struct" invariants — both the
-/// long and short forms share the same downstream gate.
+/// The returned [`CompositeAttr`] carries `custom_name: None`; an
+/// optional sibling `name = "..."` in the same `#[obj(...)]` is merged
+/// in afterwards by [`apply_struct_index_name`]. It is then validated
+/// downstream by [`validate_and_lift_composites`], which already
+/// enforces the `≥ 2 fields` and "field declared on struct"
+/// invariants — both the long and short forms share the same
+/// downstream gate.
 fn parse_struct_index_short(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<CompositeAttr> {
     let span = meta.path.span();
     let kind = parse_index_kind(meta)?;
@@ -1002,10 +1098,12 @@ fn parse_one_field_attr(
             custom_name = Some(s);
             return Ok(());
         }
-        if meta.path.is_ident("default") {
+        if meta.path.is_ident("default") || meta.path.is_ident("default_with") {
             return skip_unrelated_field_meta(&meta);
         }
-        Err(meta.error("unknown obj field attribute (expected `index`, `name`, or `default`)"))
+        Err(meta.error(
+            "unknown obj field attribute (expected `index`, `name`, `default`, or `default_with`)",
+        ))
     })?;
     finalize_field_index(field, field_name, kind, custom_name, specs)
 }
