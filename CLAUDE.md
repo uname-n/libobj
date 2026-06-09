@@ -201,15 +201,15 @@ Coverage is **not** part of the mandatory safety checks. Run it explicitly as a 
 Install once: `cargo install cargo-llvm-cov --locked`
 
 ```sh
-cargo llvm-cov --workspace --all-features --summary-only --fail-under-lines 85
+cargo llvm-cov --workspace --all-features --summary-only --fail-under-lines 90
 ```
 
 ### Ratchet plan
 
 | Gate | Action |
 |------|--------|
-| 85% (current) | Initial gate — already green. |
-| 90% | Raise `--fail-under-lines` to `90` once new tests push past it. |
+| 85% (done) | Initial gate — passed. |
+| 90% (current) | `--fail-under-lines` raised to `90` after coverage reached 91.40%. |
 | 95% | Raise to `95`; use `#[cfg(not(coverage))]` exclusions **only** for proven-unreachable or generated code, with a comment explaining why. |
 
 Never exclude code merely to hit the number without justification.

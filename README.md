@@ -186,7 +186,7 @@ cargo install cargo-llvm-cov --locked
 Then measure coverage (not part of the mandatory safety checks):
 
 ```sh
-cargo llvm-cov --workspace --all-features --summary-only --fail-under-lines 85
+cargo llvm-cov --workspace --all-features --summary-only --fail-under-lines 90
 ```
 
 See [CLAUDE.md](CLAUDE.md) for the ratchet plan.
