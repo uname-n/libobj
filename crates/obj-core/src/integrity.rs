@@ -760,3 +760,238 @@ fn list_catalog_for_pointer_check<F: FileBackend>(
 pub fn fresh_descent_stack() -> HeaplessVec<PageId, MAX_BTREE_DEPTH> {
     HeaplessVec::new()
 }
+
+/// Unit tests for the failure arms that cannot be reached through the
+/// public walk entry points:
+///
+/// - the `MAX_RANGE_NODES` node-count budget in [`record_btree_visit`]
+///   would need a tree of more than one million REAL pages to trip via
+///   [`walk_btree`];
+/// - [`verify_level_invariant`] and [`verify_sort_invariant`] are
+///   belt-and-suspenders re-checks of invariants `decode_node` already
+///   rejects (as `Error::Corruption`, surfaced by
+///   [`read_and_validate_node`] as `ChecksumMismatch`), so their
+///   failure pushes only fire on a `DecodedNode` constructed in
+///   memory.
+///
+/// The reachable corruption arms (depth bound, descent-graph cycle,
+/// damaged trailer, undecodable node, unrecoverable index id, dangling
+/// catalog root, broken freelist chain) are integration-tested against
+/// a real pager in `obj-core/tests/integrity_corruption.rs`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::btree::node::{DecodedNode, InternalEntry, LeafEntry};
+
+    fn test_ctx() -> TreeContext {
+        TreeContext {
+            label: "primary:widgets".to_owned(),
+            root: PageId::new(1).expect("non-zero page id"),
+        }
+    }
+
+    fn empty_node(kind: NodeKind, level: u8) -> DecodedNode {
+        DecodedNode {
+            kind,
+            level,
+            next_sibling: 0,
+            children: Vec::new(),
+            leaves: Vec::new(),
+            internals: Vec::new(),
+        }
+    }
+
+    fn budget() -> u64 {
+        u64::try_from(MAX_RANGE_NODES).expect("MAX_RANGE_NODES fits in u64")
+    }
+
+    #[test]
+    fn record_btree_visit_walks_a_fresh_page() {
+        let mut visited: HashSet<PageId> = HashSet::new();
+        let mut reachable: HashSet<PageId> = HashSet::new();
+        let mut pages_walked: u64 = 0;
+        let mut failures: Vec<IntegrityFailure> = Vec::new();
+        let pid = PageId::new(7).expect("non-zero page id");
+        let step = record_btree_visit(
+            pid,
+            &test_ctx(),
+            &mut WalkVisitState {
+                visited: &mut visited,
+                reachable: &mut reachable,
+                pages_walked: &mut pages_walked,
+                failures: &mut failures,
+            },
+        );
+        assert!(matches!(step, VisitStep::Walked));
+        assert!(failures.is_empty(), "no failure expected: {failures:?}");
+        assert!(reachable.contains(&pid));
+        assert_eq!(pages_walked, 1);
+    }
+
+    #[test]
+    fn record_btree_visit_reports_cycle_on_revisit() {
+        let mut visited: HashSet<PageId> = HashSet::new();
+        let mut reachable: HashSet<PageId> = HashSet::new();
+        let mut pages_walked: u64 = 1;
+        let mut failures: Vec<IntegrityFailure> = Vec::new();
+        let pid = PageId::new(7).expect("non-zero page id");
+        visited.insert(pid);
+        let step = record_btree_visit(
+            pid,
+            &test_ctx(),
+            &mut WalkVisitState {
+                visited: &mut visited,
+                reachable: &mut reachable,
+                pages_walked: &mut pages_walked,
+                failures: &mut failures,
+            },
+        );
+        assert!(matches!(step, VisitStep::Cycle));
+        assert_eq!(pages_walked, 1, "a revisited page is not re-counted");
+        assert!(
+            matches!(
+                failures.as_slice(),
+                [IntegrityFailure::BTreeSiblingChainBroken { tree, page_id }]
+                    if tree == "primary:widgets" && *page_id == pid.get()
+            ),
+            "expected BTreeSiblingChainBroken; got {failures:?}",
+        );
+    }
+
+    /// The `MAX_RANGE_NODES` page-walk budget: the visit that crosses
+    /// the bound records `BTreeDepthExceeded { limit: MAX_RANGE_NODES }`
+    /// and tells the walk driver to stop.
+    #[test]
+    fn record_btree_visit_reports_exceeded_node_budget() {
+        let mut visited: HashSet<PageId> = HashSet::new();
+        let mut reachable: HashSet<PageId> = HashSet::new();
+        let mut pages_walked: u64 = budget();
+        let mut failures: Vec<IntegrityFailure> = Vec::new();
+        let pid = PageId::new(42).expect("non-zero page id");
+        let step = record_btree_visit(
+            pid,
+            &test_ctx(),
+            &mut WalkVisitState {
+                visited: &mut visited,
+                reachable: &mut reachable,
+                pages_walked: &mut pages_walked,
+                failures: &mut failures,
+            },
+        );
+        assert!(matches!(step, VisitStep::BudgetExceeded));
+        assert_eq!(pages_walked, budget() + 1);
+        assert!(reachable.contains(&pid), "page is still marked reachable");
+        assert!(
+            matches!(
+                failures.as_slice(),
+                [IntegrityFailure::BTreeDepthExceeded { tree, limit }]
+                    if tree == "primary:widgets" && *limit == MAX_RANGE_NODES
+            ),
+            "expected BTreeDepthExceeded at the node budget; got {failures:?}",
+        );
+    }
+
+    #[test]
+    fn verify_level_invariant_flags_nonzero_leaf_level() {
+        let node = empty_node(NodeKind::Leaf, 3);
+        let mut failures: Vec<IntegrityFailure> = Vec::new();
+        let pid = PageId::new(9).expect("non-zero page id");
+        verify_level_invariant(pid, &node, "index:users.by_email", &mut failures);
+        assert!(
+            matches!(
+                failures.as_slice(),
+                [IntegrityFailure::BTreeLevelInvariantViolated { tree, page_id }]
+                    if tree == "index:users.by_email" && *page_id == pid.get()
+            ),
+            "expected BTreeLevelInvariantViolated; got {failures:?}",
+        );
+    }
+
+    #[test]
+    fn verify_level_invariant_flags_zero_internal_level() {
+        let mut node = empty_node(NodeKind::Internal, 0);
+        node.children.push(2);
+        let mut failures: Vec<IntegrityFailure> = Vec::new();
+        let pid = PageId::new(5).expect("non-zero page id");
+        verify_level_invariant(pid, &node, "catalog", &mut failures);
+        assert!(
+            matches!(
+                failures.as_slice(),
+                [IntegrityFailure::BTreeLevelInvariantViolated { tree, page_id }]
+                    if tree == "catalog" && *page_id == pid.get()
+            ),
+            "expected BTreeLevelInvariantViolated; got {failures:?}",
+        );
+    }
+
+    #[test]
+    fn verify_level_invariant_accepts_consistent_levels() {
+        let pid = PageId::new(5).expect("non-zero page id");
+        let mut failures: Vec<IntegrityFailure> = Vec::new();
+        verify_level_invariant(pid, &empty_node(NodeKind::Leaf, 0), "catalog", &mut failures);
+        let mut internal = empty_node(NodeKind::Internal, 1);
+        internal.children.push(2);
+        verify_level_invariant(pid, &internal, "catalog", &mut failures);
+        assert!(failures.is_empty(), "no failure expected: {failures:?}");
+    }
+
+    fn leaf_with_keys(keys: &[&[u8]]) -> DecodedNode {
+        let mut node = empty_node(NodeKind::Leaf, 0);
+        for key in keys {
+            node.leaves.push(LeafEntry {
+                key: key.to_vec(),
+                value: Vec::new(),
+            });
+        }
+        node
+    }
+
+    fn internal_with_pivots(pivots: &[&[u8]]) -> DecodedNode {
+        let mut node = empty_node(NodeKind::Internal, 1);
+        node.children.push(2);
+        for key in pivots {
+            node.internals.push(InternalEntry { key: key.to_vec() });
+            node.children.push(3);
+        }
+        node
+    }
+
+    #[test]
+    fn verify_sort_invariant_flags_descending_leaf_keys() {
+        let node = leaf_with_keys(&[b"b", b"a"]);
+        let mut failures: Vec<IntegrityFailure> = Vec::new();
+        let pid = PageId::new(4).expect("non-zero page id");
+        verify_sort_invariant(pid, &node, &mut failures);
+        assert!(
+            matches!(
+                failures.as_slice(),
+                [IntegrityFailure::BTreeSortViolation { page_id }] if *page_id == pid.get()
+            ),
+            "expected BTreeSortViolation; got {failures:?}",
+        );
+    }
+
+    #[test]
+    fn verify_sort_invariant_flags_duplicate_internal_pivots() {
+        let node = internal_with_pivots(&[b"k", b"k"]);
+        let mut failures: Vec<IntegrityFailure> = Vec::new();
+        let pid = PageId::new(6).expect("non-zero page id");
+        verify_sort_invariant(pid, &node, &mut failures);
+        assert!(
+            matches!(
+                failures.as_slice(),
+                [IntegrityFailure::BTreeSortViolation { page_id }] if *page_id == pid.get()
+            ),
+            "expected BTreeSortViolation; got {failures:?}",
+        );
+    }
+
+    #[test]
+    fn verify_sort_invariant_accepts_sorted_keys() {
+        let mut failures: Vec<IntegrityFailure> = Vec::new();
+        let pid = PageId::new(4).expect("non-zero page id");
+        verify_sort_invariant(pid, &leaf_with_keys(&[b"a", b"b"]), &mut failures);
+        verify_sort_invariant(pid, &internal_with_pivots(&[b"d", b"m"]), &mut failures);
+        assert!(failures.is_empty(), "no failure expected: {failures:?}");
+    }
+}
