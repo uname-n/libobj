@@ -2044,4 +2044,424 @@ mod tests {
         assert_eq!(extracted[0], direct);
         assert_eq!(extracted[0].as_bytes()[0], crate::index::key::COMPOSITE_TAG);
     }
+
+    // ── FieldProjector: every remaining top-level scalar stub ──────────
+
+    /// Selects which `Serializer` entry point [`TopScalarDoc`] drives.
+    /// One variant per `FieldProjector` stub that returns
+    /// `Ok(BTreeMap::new())` and is not covered by a derived doc shape.
+    #[derive(Debug, Clone, Copy)]
+    enum ScalarMode {
+        Bool,
+        I8,
+        I16,
+        I32,
+        I64,
+        U8,
+        U16,
+        U32,
+        F32,
+        F64,
+        Char,
+        Str,
+        Bytes,
+        Unit,
+        UnitStruct,
+        UnitVariant,
+        NewtypeVariant,
+    }
+
+    /// Hand-written `Serialize` that hits exactly one top-level
+    /// `FieldProjector` method per [`ScalarMode`]. All of them yield an
+    /// empty projection, so extraction reports `IndexFieldMissing`.
+    struct TopScalarDoc(ScalarMode);
+
+    impl Serialize for TopScalarDoc {
+        fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+            match self.0 {
+                ScalarMode::Bool => s.serialize_bool(true),
+                ScalarMode::I8 => s.serialize_i8(-1),
+                ScalarMode::I16 => s.serialize_i16(-2),
+                ScalarMode::I32 => s.serialize_i32(-3),
+                ScalarMode::I64 => s.serialize_i64(-4),
+                ScalarMode::U8 => s.serialize_u8(1),
+                ScalarMode::U16 => s.serialize_u16(2),
+                ScalarMode::U32 => s.serialize_u32(3),
+                ScalarMode::F32 => s.serialize_f32(1.5),
+                ScalarMode::F64 => s.serialize_f64(2.5),
+                ScalarMode::Char => s.serialize_char('q'),
+                ScalarMode::Str => s.serialize_str("top"),
+                ScalarMode::Bytes => s.serialize_bytes(&[0xAB]),
+                ScalarMode::Unit => s.serialize_unit(),
+                ScalarMode::UnitStruct => s.serialize_unit_struct("Marker"),
+                ScalarMode::UnitVariant => s.serialize_unit_variant("E", 0, "V"),
+                ScalarMode::NewtypeVariant => s.serialize_newtype_variant("E", 0, "V", &7u64),
+            }
+        }
+    }
+
+    impl<'de> serde::Deserialize<'de> for TopScalarDoc {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+            serde::de::IgnoredAny::deserialize(d)?;
+            Ok(Self(ScalarMode::Unit))
+        }
+    }
+
+    impl Document for TopScalarDoc {
+        const COLLECTION: &'static str = "topscalars";
+        const VERSION: u32 = 1;
+    }
+
+    #[test]
+    fn projector_scalar_top_levels_error_missing() {
+        let modes = [
+            ScalarMode::Bool,
+            ScalarMode::I8,
+            ScalarMode::I16,
+            ScalarMode::I32,
+            ScalarMode::I64,
+            ScalarMode::U8,
+            ScalarMode::U16,
+            ScalarMode::U32,
+            ScalarMode::F32,
+            ScalarMode::F64,
+            ScalarMode::Char,
+            ScalarMode::Str,
+            ScalarMode::Bytes,
+            ScalarMode::Unit,
+            ScalarMode::UnitStruct,
+            ScalarMode::UnitVariant,
+            ScalarMode::NewtypeVariant,
+        ];
+        let spec = IndexSpec::standard("by_x", "x").expect("spec");
+        for mode in modes {
+            let doc = TopScalarDoc(mode);
+            let err = extract_index_keys(TopScalarDoc::COLLECTION, &spec, &doc)
+                .expect_err("empty projection must report the path as missing");
+            assert!(
+                matches!(err, Error::IndexFieldMissing { .. }),
+                "mode {mode:?}: expected IndexFieldMissing, got {err:?}"
+            );
+        }
+    }
+
+    // ── FieldProjector: top-level tuple → seq_unsupported ──────────────
+
+    /// Hand-written `Serialize` driving `serialize_tuple` at the top
+    /// level — the one `seq_unsupported` arm no derived doc reaches
+    /// (derives produce tuple *structs* / *variants*, not bare tuples).
+    struct TopTupleDoc;
+
+    impl Serialize for TopTupleDoc {
+        fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+            use serde::ser::SerializeTuple;
+            let mut t = s.serialize_tuple(2)?;
+            t.serialize_element(&1u64)?;
+            t.serialize_element(&2u64)?;
+            t.end()
+        }
+    }
+
+    impl<'de> serde::Deserialize<'de> for TopTupleDoc {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+            serde::de::IgnoredAny::deserialize(d)?;
+            Ok(Self)
+        }
+    }
+
+    impl Document for TopTupleDoc {
+        const COLLECTION: &'static str = "toptuples";
+        const VERSION: u32 = 1;
+    }
+
+    #[test]
+    fn projector_bare_tuple_top_level_errors_invalid_argument() {
+        let spec = IndexSpec::standard("by_x", "x").expect("spec");
+        let err = extract_index_keys(TopTupleDoc::COLLECTION, &spec, &TopTupleDoc)
+            .expect_err("tuple top-level");
+        assert!(matches!(err, Error::InvalidArgument(_)));
+    }
+
+    // ── ProjectBuilder: i64 / bool map keys + key error paths ──────────
+
+    /// Map keyed by `i64`, exercising the `Dynamic::I64(n) →
+    /// n.to_string()` arm of `ProjectBuilder::serialize_key`.
+    #[derive(Debug, Serialize, Deserialize)]
+    struct I64KeyMapDoc(std::collections::BTreeMap<i64, u64>);
+
+    impl Document for I64KeyMapDoc {
+        const COLLECTION: &'static str = "i64keymaps";
+        const VERSION: u32 = 1;
+    }
+
+    /// Map keyed by `bool`, exercising the `Dynamic::Bool(b) →
+    /// b.to_string()` arm of `ProjectBuilder::serialize_key`.
+    #[derive(Debug, Serialize, Deserialize)]
+    struct BoolKeyMapDoc(std::collections::BTreeMap<bool, u64>);
+
+    impl Document for BoolKeyMapDoc {
+        const COLLECTION: &'static str = "boolkeymaps";
+        const VERSION: u32 = 1;
+    }
+
+    #[test]
+    fn projector_map_i64_key_stringified_for_lookup() {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert(-5i64, 7u64);
+        let doc = I64KeyMapDoc(m);
+        let spec = IndexSpec::standard("by_neg5", "-5").expect("spec");
+        let keys = extract_index_keys(I64KeyMapDoc::COLLECTION, &spec, &doc).expect("extract");
+        assert_eq!(keys.len(), 1);
+        let expected = encode_field(&Dynamic::U64(7)).expect("enc");
+        assert_eq!(keys[0], expected);
+    }
+
+    #[test]
+    fn projector_map_bool_key_stringified_for_lookup() {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert(true, 3u64);
+        let doc = BoolKeyMapDoc(m);
+        let spec = IndexSpec::standard("by_true", "true").expect("spec");
+        let keys = extract_index_keys(BoolKeyMapDoc::COLLECTION, &spec, &doc).expect("extract");
+        assert_eq!(keys.len(), 1);
+        let expected = encode_field(&Dynamic::U64(3)).expect("enc");
+        assert_eq!(keys[0], expected);
+    }
+
+    /// A map whose key reflects to `Dynamic::F64` — not coercible to a
+    /// field name. Drives the non-stringable-key error arm of BOTH
+    /// `ProjectBuilder::serialize_key` (top-level extract) and
+    /// `MapBuilder::serialize_key` (full reflection via `to_dynamic`).
+    struct BadKeyMap;
+
+    impl Serialize for BadKeyMap {
+        fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap;
+            let mut m = s.serialize_map(Some(1))?;
+            m.serialize_key(&1.5f64)?;
+            m.serialize_value(&1u64)?;
+            m.end()
+        }
+    }
+
+    impl<'de> serde::Deserialize<'de> for BadKeyMap {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+            serde::de::IgnoredAny::deserialize(d)?;
+            Ok(Self)
+        }
+    }
+
+    impl Document for BadKeyMap {
+        const COLLECTION: &'static str = "badkeymaps";
+        const VERSION: u32 = 1;
+    }
+
+    /// A map that emits a value with no preceding key. Drives the
+    /// `pending_key == None` error arm of both `ProjectBuilder` and
+    /// `MapBuilder` `serialize_value`.
+    struct ValuelessMap;
+
+    impl Serialize for ValuelessMap {
+        fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap;
+            let mut m = s.serialize_map(Some(1))?;
+            m.serialize_value(&1u64)?;
+            m.end()
+        }
+    }
+
+    impl<'de> serde::Deserialize<'de> for ValuelessMap {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+            serde::de::IgnoredAny::deserialize(d)?;
+            Ok(Self)
+        }
+    }
+
+    impl Document for ValuelessMap {
+        const COLLECTION: &'static str = "valuelessmaps";
+        const VERSION: u32 = 1;
+    }
+
+    #[test]
+    fn projector_map_non_stringable_key_errors() {
+        let spec = IndexSpec::standard("by_x", "x").expect("spec");
+        let err = extract_index_keys(BadKeyMap::COLLECTION, &spec, &BadKeyMap)
+            .expect_err("f64 map key");
+        assert!(matches!(err, Error::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn projector_map_value_without_key_errors() {
+        let spec = IndexSpec::standard("by_x", "x").expect("spec");
+        let err = extract_index_keys(ValuelessMap::COLLECTION, &spec, &ValuelessMap)
+            .expect_err("value without key");
+        assert!(matches!(err, Error::InvalidArgument(_)));
+    }
+
+    // ── NullSerializer: discard every unwanted field shape ─────────────
+
+    /// One variant per compound enum shape, so a single unwanted-field
+    /// doc walks `NullSerializer`'s unit-variant, newtype-variant,
+    /// tuple-variant, and struct-variant paths.
+    #[derive(Debug, Serialize, Deserialize)]
+    enum Mixed {
+        Unit,
+        New(u64),
+        Tup(u64, bool),
+        Struct { a: u64 },
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct PairTuple(u64, i64);
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct UnitMarker;
+
+    /// A doc with one wanted field and one unwanted field of every
+    /// shape `NullSerializer` must visit-and-discard: narrow ints,
+    /// f32, char, unit, unit struct, bare tuple, tuple struct, map
+    /// (key + value), nested struct, and all four enum variant kinds.
+    #[derive(Debug, Serialize, Deserialize)]
+    struct KitchenDoc {
+        wanted: u64,
+        skip_i8: i8,
+        skip_i16: i16,
+        skip_i32: i32,
+        skip_u16: u16,
+        skip_u32: u32,
+        skip_f32: f32,
+        skip_char: char,
+        skip_unit: (),
+        skip_unit_struct: UnitMarker,
+        skip_tuple: (u64, bool),
+        skip_tuple_struct: PairTuple,
+        skip_map: std::collections::BTreeMap<String, u64>,
+        skip_struct: Inner,
+        skip_enum_unit: Mixed,
+        skip_enum_newtype: Mixed,
+        skip_enum_tuple: Mixed,
+        skip_enum_struct: Mixed,
+    }
+
+    impl Document for KitchenDoc {
+        const COLLECTION: &'static str = "kitchen";
+        const VERSION: u32 = 1;
+    }
+
+    #[test]
+    fn null_serializer_discards_every_unwanted_shape() {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("k".to_owned(), 1u64);
+        let doc = KitchenDoc {
+            wanted: 9,
+            skip_i8: -1,
+            skip_i16: -2,
+            skip_i32: -3,
+            skip_u16: 2,
+            skip_u32: 3,
+            skip_f32: 1.5,
+            skip_char: 'z',
+            skip_unit: (),
+            skip_unit_struct: UnitMarker,
+            skip_tuple: (4, true),
+            skip_tuple_struct: PairTuple(5, -6),
+            skip_map: m,
+            skip_struct: Inner { val: 8 },
+            skip_enum_unit: Mixed::Unit,
+            skip_enum_newtype: Mixed::New(10),
+            skip_enum_tuple: Mixed::Tup(11, false),
+            skip_enum_struct: Mixed::Struct { a: 12 },
+        };
+        let spec = IndexSpec::standard("by_wanted", "wanted").expect("spec");
+        let keys = extract_index_keys(KitchenDoc::COLLECTION, &spec, &doc).expect("extract");
+        assert_eq!(keys.len(), 1);
+        let expected = encode_field(&Dynamic::U64(9)).expect("enc");
+        assert_eq!(keys[0], expected);
+    }
+
+    // ── DynamicSerializer: scalar widths, 128-bit narrowing, shapes ────
+
+    #[test]
+    fn dynamic_scalar_widths_reflect() {
+        assert_eq!(to_dynamic(&-1i8).expect("i8"), Dynamic::I64(-1));
+        assert_eq!(to_dynamic(&-2i16).expect("i16"), Dynamic::I64(-2));
+        assert_eq!(to_dynamic(&-3i32).expect("i32"), Dynamic::I64(-3));
+        assert_eq!(to_dynamic(&1u8).expect("u8"), Dynamic::U64(1));
+        assert_eq!(to_dynamic(&2u16).expect("u16"), Dynamic::U64(2));
+        assert_eq!(to_dynamic(&3u32).expect("u32"), Dynamic::U64(3));
+        assert_eq!(to_dynamic(&1.5f32).expect("f32"), Dynamic::F64(1.5));
+        assert_eq!(to_dynamic(&'q').expect("char"), Dynamic::String("q".to_owned()));
+        assert_eq!(to_dynamic(&()).expect("unit"), Dynamic::Null);
+        assert_eq!(to_dynamic(&UnitMarker).expect("unit struct"), Dynamic::Null);
+    }
+
+    #[test]
+    fn dynamic_i128_u128_narrow_to_64_bit() {
+        assert_eq!(to_dynamic(&-5i128).expect("i128"), Dynamic::I64(-5));
+        assert_eq!(to_dynamic(&5u128).expect("u128"), Dynamic::U64(5));
+    }
+
+    #[test]
+    fn dynamic_compound_shapes_reflect() {
+        assert_eq!(
+            to_dynamic(&(1u64, true)).expect("tuple"),
+            Dynamic::Seq(vec![Dynamic::U64(1), Dynamic::Bool(true)]),
+        );
+        assert_eq!(
+            to_dynamic(&PairTuple(1, -2)).expect("tuple struct"),
+            Dynamic::Seq(vec![Dynamic::U64(1), Dynamic::I64(-2)]),
+        );
+        assert_eq!(
+            to_dynamic(&Mixed::Unit).expect("unit variant"),
+            Dynamic::String("Unit".to_owned()),
+        );
+        assert_eq!(
+            to_dynamic(&Mixed::New(7)).expect("newtype variant"),
+            Dynamic::Map(BTreeMap::from([("New".to_owned(), Dynamic::U64(7))])),
+        );
+        assert_eq!(
+            to_dynamic(&Mixed::Tup(1, false)).expect("tuple variant"),
+            Dynamic::Seq(vec![Dynamic::U64(1), Dynamic::Bool(false)]),
+        );
+        assert_eq!(
+            to_dynamic(&Mixed::Struct { a: 3 }).expect("struct variant"),
+            Dynamic::Map(BTreeMap::from([("a".to_owned(), Dynamic::U64(3))])),
+        );
+    }
+
+    // ── MapBuilder: key coercion + key error paths ─────────────────────
+
+    #[test]
+    fn dynamic_map_numeric_and_bool_keys_stringified() {
+        let mut mu = BTreeMap::new();
+        mu.insert(7u64, 1u64);
+        assert_eq!(
+            to_dynamic(&mu).expect("u64 keys"),
+            Dynamic::Map(BTreeMap::from([("7".to_owned(), Dynamic::U64(1))])),
+        );
+        let mut mi = BTreeMap::new();
+        mi.insert(-7i64, 2u64);
+        assert_eq!(
+            to_dynamic(&mi).expect("i64 keys"),
+            Dynamic::Map(BTreeMap::from([("-7".to_owned(), Dynamic::U64(2))])),
+        );
+        let mut mb = BTreeMap::new();
+        mb.insert(false, 3u64);
+        assert_eq!(
+            to_dynamic(&mb).expect("bool keys"),
+            Dynamic::Map(BTreeMap::from([("false".to_owned(), Dynamic::U64(3))])),
+        );
+    }
+
+    #[test]
+    fn dynamic_map_non_stringable_key_errors() {
+        let err = to_dynamic(&BadKeyMap).expect_err("f64 map key");
+        assert!(matches!(err, Error::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn dynamic_map_value_without_key_errors() {
+        let err = to_dynamic(&ValuelessMap).expect_err("value without key");
+        assert!(matches!(err, Error::InvalidArgument(_)));
+    }
 }
