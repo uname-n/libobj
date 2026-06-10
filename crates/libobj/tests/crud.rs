@@ -13,8 +13,8 @@ use std::ptr;
 use tempfile::TempDir;
 
 use obj::{
-    obj_close, obj_db_t, obj_doc_delete, obj_doc_get, obj_doc_insert, obj_doc_update,
-    obj_doc_upsert, obj_free_buffer, obj_open, obj_read_txn_t, obj_txn_begin_read,
+    obj_close, obj_db_t, obj_doc_delete_raw, obj_doc_get, obj_doc_insert_raw, obj_doc_update_raw,
+    obj_doc_upsert_raw, obj_free_buffer, obj_open, obj_read_txn_t, obj_txn_begin_read,
     obj_txn_begin_write, obj_txn_commit, obj_txn_end_read, obj_txn_rollback, obj_write_txn_t,
     OBJ_ERR_INVALID_ARG, OBJ_ERR_NOT_FOUND, OBJ_OK,
 };
@@ -57,7 +57,7 @@ fn insert(txn: *mut obj_write_txn_t, collection: &str, payload: &[u8]) -> u64 {
     let cs = CString::new(collection).expect("non-NUL");
     let mut id: u64 = 0;
     let code = unsafe {
-        obj_doc_insert(
+        obj_doc_insert_raw(
             txn,
             cs.as_ptr(),
             payload.as_ptr(),
@@ -65,7 +65,7 @@ fn insert(txn: *mut obj_write_txn_t, collection: &str, payload: &[u8]) -> u64 {
             &raw mut id,
         )
     };
-    assert_eq!(code, OBJ_OK, "obj_doc_insert returned {code}");
+    assert_eq!(code, OBJ_OK, "obj_doc_insert_raw returned {code}");
     assert_ne!(id, 0);
     id
 }
@@ -114,7 +114,7 @@ fn update_changes_payload() {
     let cs = CString::new("things").expect("non-NUL");
     let new_payload = b"second";
     let code = unsafe {
-        obj_doc_update(
+        obj_doc_update_raw(
             txn,
             cs.as_ptr(),
             id,
@@ -143,7 +143,7 @@ fn delete_removes_document() {
 
     let txn = begin_write(db);
     let cs = CString::new("things").expect("non-NUL");
-    let code = unsafe { obj_doc_delete(txn, cs.as_ptr(), id) };
+    let code = unsafe { obj_doc_delete_raw(txn, cs.as_ptr(), id) };
     assert_eq!(code, OBJ_OK);
     let code = unsafe { obj_txn_commit(txn) };
     assert_eq!(code, OBJ_OK);
@@ -161,7 +161,7 @@ fn update_missing_returns_not_found() {
     let txn = begin_write(db);
     let _id = insert(txn, "things", b"present");
     let cs = CString::new("things").expect("non-NUL");
-    let code = unsafe { obj_doc_update(txn, cs.as_ptr(), 999, b"x".as_ptr(), 1) };
+    let code = unsafe { obj_doc_update_raw(txn, cs.as_ptr(), 999, b"x".as_ptr(), 1) };
     assert_eq!(code, OBJ_ERR_NOT_FOUND, "expected NOT_FOUND, got {code}");
     unsafe { obj_txn_rollback(txn) };
     unsafe { obj_close(db) };
@@ -173,7 +173,7 @@ fn delete_missing_returns_not_found() {
     let txn = begin_write(db);
     let _id = insert(txn, "things", b"present");
     let cs = CString::new("things").expect("non-NUL");
-    let code = unsafe { obj_doc_delete(txn, cs.as_ptr(), 999) };
+    let code = unsafe { obj_doc_delete_raw(txn, cs.as_ptr(), 999) };
     assert_eq!(code, OBJ_ERR_NOT_FOUND);
     unsafe { obj_txn_rollback(txn) };
     unsafe { obj_close(db) };
@@ -184,13 +184,13 @@ fn upsert_at_specific_id_creates_then_replaces() {
     let (_dir, db) = open_db("upsert.obj");
     let txn = begin_write(db);
     let cs = CString::new("things").expect("non-NUL");
-    let code = unsafe { obj_doc_upsert(txn, cs.as_ptr(), 42, b"first".as_ptr(), 5) };
+    let code = unsafe { obj_doc_upsert_raw(txn, cs.as_ptr(), 42, b"first".as_ptr(), 5) };
     assert_eq!(code, OBJ_OK);
     let code = unsafe { obj_txn_commit(txn) };
     assert_eq!(code, OBJ_OK);
 
     let txn = begin_write(db);
-    let code = unsafe { obj_doc_upsert(txn, cs.as_ptr(), 42, b"second".as_ptr(), 6) };
+    let code = unsafe { obj_doc_upsert_raw(txn, cs.as_ptr(), 42, b"second".as_ptr(), 6) };
     assert_eq!(code, OBJ_OK);
     let code = unsafe { obj_txn_commit(txn) };
     assert_eq!(code, OBJ_OK);
@@ -207,7 +207,7 @@ fn insert_with_null_collection_returns_invalid_arg() {
     let (_dir, db) = open_db("invalid-arg.obj");
     let txn = begin_write(db);
     let mut id: u64 = 0;
-    let code = unsafe { obj_doc_insert(txn, ptr::null(), b"x".as_ptr(), 1, &raw mut id) };
+    let code = unsafe { obj_doc_insert_raw(txn, ptr::null(), b"x".as_ptr(), 1, &raw mut id) };
     assert_eq!(code, OBJ_ERR_INVALID_ARG);
     unsafe { obj_txn_rollback(txn) };
     unsafe { obj_close(db) };
@@ -219,7 +219,7 @@ fn null_payload_with_zero_len_is_accepted() {
     let txn = begin_write(db);
     let cs = CString::new("things").expect("non-NUL");
     let mut id: u64 = 0;
-    let code = unsafe { obj_doc_insert(txn, cs.as_ptr(), ptr::null(), 0, &raw mut id) };
+    let code = unsafe { obj_doc_insert_raw(txn, cs.as_ptr(), ptr::null(), 0, &raw mut id) };
     assert_eq!(code, OBJ_OK);
     let code = unsafe { obj_txn_commit(txn) };
     assert_eq!(code, OBJ_OK);

@@ -11,7 +11,7 @@ use std::ptr;
 use tempfile::TempDir;
 
 use obj::{
-    obj_backup_to, obj_close, obj_db_t, obj_doc_insert, obj_free_buffer, obj_integrity_check,
+    obj_backup_to, obj_close, obj_db_t, obj_doc_insert_raw, obj_free_buffer, obj_integrity_check,
     obj_integrity_report_failure_at, obj_integrity_report_failure_count, obj_integrity_report_free,
     obj_integrity_report_is_ok, obj_integrity_report_pages_checked, obj_integrity_report_t,
     obj_open, obj_stat, obj_stat_t, obj_txn_begin_write, obj_txn_commit, OBJ_ERR_INTEGRITY, OBJ_OK,
@@ -42,7 +42,7 @@ fn integrity_check_passes_on_clean_db() {
     for _ in 0..3 {
         let mut id: u64 = 0;
         let code =
-            unsafe { obj_doc_insert(txn, collection.as_ptr(), b"x".as_ptr(), 1, &raw mut id) };
+            unsafe { obj_doc_insert_raw(txn, collection.as_ptr(), b"x".as_ptr(), 1, &raw mut id) };
         assert_eq!(code, OBJ_OK);
     }
     let code = unsafe { obj_txn_commit(txn) };
@@ -91,7 +91,7 @@ fn integrity_check_surfaces_corruption_after_byte_flip() {
         for _ in 0..16 {
             let mut id: u64 = 0;
             let code = unsafe {
-                obj_doc_insert(
+                obj_doc_insert_raw(
                     txn,
                     collection.as_ptr(),
                     b"payload".as_ptr(),
@@ -174,7 +174,7 @@ fn backup_round_trips_via_c_abi() {
     for _ in 0..8 {
         let mut id: u64 = 0;
         let code =
-            unsafe { obj_doc_insert(txn, collection.as_ptr(), b"x".as_ptr(), 1, &raw mut id) };
+            unsafe { obj_doc_insert_raw(txn, collection.as_ptr(), b"x".as_ptr(), 1, &raw mut id) };
         assert_eq!(code, OBJ_OK);
     }
     let code = unsafe { obj_txn_commit(txn) };
@@ -207,7 +207,7 @@ fn stat_reports_consistent_summary() {
         let cs = CString::new(collection_name).expect("non-NUL");
         for _ in 0..3 {
             let mut id: u64 = 0;
-            let code = unsafe { obj_doc_insert(txn, cs.as_ptr(), b"x".as_ptr(), 1, &raw mut id) };
+            let code = unsafe { obj_doc_insert_raw(txn, cs.as_ptr(), b"x".as_ptr(), 1, &raw mut id) };
             assert_eq!(code, OBJ_OK);
         }
     }

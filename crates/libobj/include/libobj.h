@@ -462,20 +462,6 @@ obj_error_t obj_count_index_range(obj_read_txn_t *txn,
                                   uint64_t *out_count);
 
 /**
- * Delete the document at `id` in `collection`. Returns
- * `OBJ_ERR_NOT_FOUND` if the id is absent.
- *
- * **Secondary indexes are NOT maintained**: a delete
- * through this path leaves any secondary-index entry behind. Use
- * [`obj_doc_delete_indexed`] to remove the index entries too.
- *
- * # Safety
- *
- * As [`obj_doc_update`].
- */
- obj_error_t obj_doc_delete(obj_write_txn_t *txn, const char *collection, uint64_t id);
-
-/**
  * Delete the document at `id` in `collection` AND remove its
  * secondary-index entries given the caller-supplied `remove` field
  * keys. Returns `OBJ_ERR_NOT_FOUND` if `id` is absent.
@@ -502,6 +488,20 @@ obj_error_t obj_doc_delete_indexed(obj_write_txn_t *txn,
                                    uintptr_t remove_count);
 
 /**
+ * Delete the document at `id` in `collection`. Returns
+ * `OBJ_ERR_NOT_FOUND` if the id is absent.
+ *
+ * **Secondary indexes are NOT maintained**: a delete
+ * through this path leaves any secondary-index entry behind. Use
+ * [`obj_doc_delete_indexed`] to remove the index entries too.
+ *
+ * # Safety
+ *
+ * As [`obj_doc_update_raw`].
+ */
+ obj_error_t obj_doc_delete_raw(obj_write_txn_t *txn, const char *collection, uint64_t id);
+
+/**
  * Fetch the document at `id` in `collection`. On `OBJ_OK` the
  * caller owns `*out_payload` (length `*out_payload_len`) and
  * MUST free it via `obj_free_buffer`. Returns
@@ -521,37 +521,11 @@ obj_error_t obj_doc_get(obj_read_txn_t *txn,
                         uintptr_t *out_payload_len);
 
 /**
- * Insert a raw-bytes document into `collection`. The collection
- * is lazy-created if absent. On success `*out_id` is set to the
- * freshly-allocated id.
- *
- * **Secondary indexes are NOT maintained**: this writes
- * the primary record only, so the doc is invisible to
- * `obj_find_unique` / `obj_iter_index_range` /
- * `obj_count_index_range`. Use [`obj_doc_insert_indexed`] to
- * maintain secondary indexes on insert.
- *
- * # Safety
- *
- * - `txn` must be a live write txn handle.
- * - `collection` must be a non-null NUL-terminated UTF-8 string.
- * - `payload` may be null IFF `payload_len == 0`; otherwise it
- *   must point to `payload_len` readable bytes.
- * - `out_id` must be a writable `uint64_t *`.
- */
-
-obj_error_t obj_doc_insert(obj_write_txn_t *txn,
-                           const char *collection,
-                           const uint8_t *payload,
-                           uintptr_t payload_len,
-                           uint64_t *out_id);
-
-/**
  * Insert a raw-bytes document into `collection` AND maintain the
  * named secondary indexes from the caller-supplied entries. On
  * success `*out_id` is set to the freshly-allocated id.
  *
- * Unlike [`obj_doc_insert`] (primary record only), this is the
+ * Unlike [`obj_doc_insert_raw`] (primary record only), this is the
  * index-maintaining write: each `entries[i]` names an
  * index and supplies the order-preserving field key (build it with
  * [`obj_index_key_encode`](crate::obj_index_key_encode)) the document
@@ -588,24 +562,30 @@ obj_error_t obj_doc_insert_indexed(obj_write_txn_t *txn,
                                    uint64_t *out_id);
 
 /**
- * Update the document at `id` in `collection` with `payload`.
- * Returns `OBJ_ERR_NOT_FOUND` if the id is absent.
+ * Insert a raw-bytes document into `collection`. The collection
+ * is lazy-created if absent. On success `*out_id` is set to the
+ * freshly-allocated id.
  *
- * **Secondary indexes are NOT maintained**: use
- * [`obj_doc_update_indexed`] to move a document's index entries on
- * update.
+ * **Secondary indexes are NOT maintained**: this writes
+ * the primary record only, so the doc is invisible to
+ * `obj_find_unique` / `obj_iter_index_range` /
+ * `obj_count_index_range`. Use [`obj_doc_insert_indexed`] to
+ * maintain secondary indexes on insert.
  *
  * # Safety
  *
- * As [`obj_doc_insert`] plus: `id` must have been returned by a
- * prior `obj_doc_insert` against the same collection.
+ * - `txn` must be a live write txn handle.
+ * - `collection` must be a non-null NUL-terminated UTF-8 string.
+ * - `payload` may be null IFF `payload_len == 0`; otherwise it
+ *   must point to `payload_len` readable bytes.
+ * - `out_id` must be a writable `uint64_t *`.
  */
 
-obj_error_t obj_doc_update(obj_write_txn_t *txn,
-                           const char *collection,
-                           uint64_t id,
-                           const uint8_t *payload,
-                           uintptr_t payload_len);
+obj_error_t obj_doc_insert_raw(obj_write_txn_t *txn,
+                               const char *collection,
+                               const uint8_t *payload,
+                               uintptr_t payload_len,
+                               uint64_t *out_id);
 
 /**
  * Update the document at `id` in `collection` to `payload` AND move
@@ -640,6 +620,26 @@ obj_error_t obj_doc_update_indexed(obj_write_txn_t *txn,
                                    uintptr_t add_count);
 
 /**
+ * Update the document at `id` in `collection` with `payload`.
+ * Returns `OBJ_ERR_NOT_FOUND` if the id is absent.
+ *
+ * **Secondary indexes are NOT maintained**: use
+ * [`obj_doc_update_indexed`] to move a document's index entries on
+ * update.
+ *
+ * # Safety
+ *
+ * As [`obj_doc_insert_raw`] plus: `id` must have been returned by a
+ * prior `obj_doc_insert_raw` against the same collection.
+ */
+
+obj_error_t obj_doc_update_raw(obj_write_txn_t *txn,
+                               const char *collection,
+                               uint64_t id,
+                               const uint8_t *payload,
+                               uintptr_t payload_len);
+
+/**
  * Insert-or-replace the document at `id` in `collection` with
  * `payload`. The collection is lazy-created if absent.
  *
@@ -652,14 +652,14 @@ obj_error_t obj_doc_update_indexed(obj_write_txn_t *txn,
  *
  * # Safety
  *
- * As [`obj_doc_insert`].
+ * As [`obj_doc_insert_raw`].
  */
 
-obj_error_t obj_doc_upsert(obj_write_txn_t *txn,
-                           const char *collection,
-                           uint64_t id,
-                           const uint8_t *payload,
-                           uintptr_t payload_len);
+obj_error_t obj_doc_upsert_raw(obj_write_txn_t *txn,
+                               const char *collection,
+                               uint64_t id,
+                               const uint8_t *payload,
+                               uintptr_t payload_len);
 
 /**
  * Look up a single doc by index key on a `Unique` index. The

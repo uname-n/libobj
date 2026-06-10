@@ -24,7 +24,7 @@ use std::ptr;
 use tempfile::TempDir;
 
 use obj::{
-    obj_close, obj_config_t, obj_db_t, obj_doc_get, obj_doc_insert, obj_free_buffer, obj_open,
+    obj_close, obj_config_t, obj_db_t, obj_doc_get, obj_doc_insert_raw, obj_free_buffer, obj_open,
     obj_open_with_config, obj_read_txn_t, obj_txn_begin_read, obj_txn_begin_write, obj_txn_commit,
     obj_txn_end_read, obj_write_txn_t, OBJ_ENCRYPTION_KEY_LEN, OBJ_ERR_CORRUPTION,
     OBJ_ERR_UNSUPPORTED, OBJ_OK, OBJ_SYNC_MODE_FULL,
@@ -94,7 +94,7 @@ fn insert(txn: *mut obj_write_txn_t, collection: &str, payload: &[u8]) -> u64 {
     let cs = CString::new(collection).expect("non-NUL");
     let mut id: u64 = 0;
     let code = unsafe {
-        obj_doc_insert(
+        obj_doc_insert_raw(
             txn,
             cs.as_ptr(),
             payload.as_ptr(),
@@ -102,7 +102,7 @@ fn insert(txn: *mut obj_write_txn_t, collection: &str, payload: &[u8]) -> u64 {
             &raw mut id,
         )
     };
-    assert_eq!(code, OBJ_OK, "obj_doc_insert returned {code}");
+    assert_eq!(code, OBJ_OK, "obj_doc_insert_raw returned {code}");
     id
 }
 
