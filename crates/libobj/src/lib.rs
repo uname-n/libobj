@@ -66,7 +66,7 @@ pub use queries::{
     obj_integrity_report_failure_at, obj_integrity_report_failure_count, obj_integrity_report_free,
     obj_integrity_report_is_ok, obj_integrity_report_pages_checked, obj_integrity_report_t,
     obj_iter_all, obj_iter_free, obj_iter_index_range, obj_iter_next, obj_iter_t, obj_stat,
-    obj_stat_t,
+    obj_stat_t, ObjBound,
 };
 pub use txn::{
     obj_doc_delete_raw, obj_doc_delete_indexed, obj_doc_get, obj_doc_insert_raw,

@@ -37,8 +37,8 @@ use obj::{
     obj_doc_insert_indexed, obj_doc_update_indexed, obj_find_unique, obj_free_buffer,
     obj_index_entry_t, obj_index_key_encode, obj_iter_free, obj_iter_index_range, obj_iter_next,
     obj_iter_t, obj_open, obj_read_txn_t, obj_txn_begin_read, obj_txn_begin_write, obj_txn_commit,
-    obj_txn_end_read, obj_txn_rollback, obj_write_txn_t, OBJ_ERR_INVALID_ARG, OBJ_ERR_NOT_FOUND,
-    OBJ_INDEX_VALUE_STRING, OBJ_INDEX_VALUE_U64, OBJ_OK,
+    obj_txn_end_read, obj_txn_rollback, obj_write_txn_t, ObjBound, OBJ_ERR_INVALID_ARG,
+    OBJ_ERR_NOT_FOUND, OBJ_INDEX_VALUE_STRING, OBJ_INDEX_VALUE_U64, OBJ_OK,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -514,12 +514,8 @@ fn index_range_ids(
             rtxn,
             cs_collection.as_ptr(),
             cs_index.as_ptr(),
-            key.as_ptr(),
-            key.len(),
-            true,
-            key.as_ptr(),
-            key.len(),
-            true,
+            ObjBound { ptr: key.as_ptr(), len: key.len(), inclusive: true },
+            ObjBound { ptr: key.as_ptr(), len: key.len(), inclusive: true },
             &raw mut iter,
         )
     };

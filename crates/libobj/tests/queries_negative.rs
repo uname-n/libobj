@@ -37,8 +37,8 @@ use obj::{
     obj_integrity_report_free, obj_integrity_report_t, obj_iter_all, obj_iter_free,
     obj_iter_index_range, obj_iter_next, obj_iter_t, obj_open, obj_read_txn_t, obj_stat,
     obj_stat_t, obj_txn_begin_read, obj_txn_begin_write, obj_txn_commit, obj_txn_end_read,
-    obj_txn_rollback, obj_write_txn_t, OBJ_ERR_INVALID_ARG, OBJ_ERR_NOT_FOUND, OBJ_ERR_UTF8,
-    OBJ_OK,
+    obj_txn_rollback, obj_write_txn_t, ObjBound, OBJ_ERR_INVALID_ARG, OBJ_ERR_NOT_FOUND,
+    OBJ_ERR_UTF8, OBJ_OK,
 };
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -175,12 +175,8 @@ fn iter_index_range_null_txn_returns_invalid_arg() {
             ptr::null_mut(),
             cs.as_ptr(),
             idx.as_ptr(),
-            ptr::null(),
-            0,
-            false,
-            ptr::null(),
-            0,
-            false,
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
             &raw mut iter,
         )
     };
@@ -199,12 +195,8 @@ fn iter_index_range_null_collection_returns_invalid_arg() {
             rtxn,
             ptr::null(),
             idx.as_ptr(),
-            ptr::null(),
-            0,
-            false,
-            ptr::null(),
-            0,
-            false,
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
             &raw mut iter,
         )
     };
@@ -227,12 +219,8 @@ fn iter_index_range_null_index_name_returns_invalid_arg() {
             rtxn,
             cs.as_ptr(),
             ptr::null(),
-            ptr::null(),
-            0,
-            false,
-            ptr::null(),
-            0,
-            false,
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
             &raw mut iter,
         )
     };
@@ -255,12 +243,8 @@ fn iter_index_range_null_out_iter_returns_invalid_arg() {
             rtxn,
             cs.as_ptr(),
             idx.as_ptr(),
-            ptr::null(),
-            0,
-            false,
-            ptr::null(),
-            0,
-            false,
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
             ptr::null_mut(),
         )
     };
@@ -278,18 +262,14 @@ fn iter_index_range_null_lower_nonzero_len_returns_invalid_arg() {
     let cs = CString::new("c").expect("non-NUL");
     let idx = CString::new("by_x").expect("non-NUL");
     let mut iter: *mut obj_iter_t = ptr::null_mut();
-    // SAFETY: lower=null but lower_len=1 — invalid combo bytes_to_bound guards against.
+    // SAFETY: lower.ptr=null but lower.len=1 — invalid combo bytes_to_bound guards against.
     let code = unsafe {
         obj_iter_index_range(
             rtxn,
             cs.as_ptr(),
             idx.as_ptr(),
-            ptr::null(),
-            1,
-            true,
-            ptr::null(),
-            0,
-            false,
+            ObjBound { ptr: ptr::null(), len: 1, inclusive: true },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
             &raw mut iter,
         )
     };
@@ -309,19 +289,15 @@ fn iter_index_range_null_upper_nonzero_len_returns_invalid_arg() {
     let idx = CString::new("by_x").expect("non-NUL");
     let lower_key = b"\x01";
     let mut iter: *mut obj_iter_t = ptr::null_mut();
-    // SAFETY: upper=null but upper_len=1 — invalid combo bytes_to_bound guards against.
+    // SAFETY: upper.ptr=null but upper.len=1 — invalid combo bytes_to_bound guards against.
     // lower is a valid non-null 1-byte slice.
     let code = unsafe {
         obj_iter_index_range(
             rtxn,
             cs.as_ptr(),
             idx.as_ptr(),
-            lower_key.as_ptr(),
-            lower_key.len(),
-            true,
-            ptr::null(),
-            1,
-            false,
+            ObjBound { ptr: lower_key.as_ptr(), len: lower_key.len(), inclusive: true },
+            ObjBound { ptr: ptr::null(), len: 1, inclusive: false },
             &raw mut iter,
         )
     };
@@ -346,12 +322,8 @@ fn iter_index_range_invalid_utf8_collection_returns_utf8_error() {
             rtxn,
             bad.as_ptr().cast(),
             idx.as_ptr(),
-            ptr::null(),
-            0,
-            false,
-            ptr::null(),
-            0,
-            false,
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
             &raw mut iter,
         )
     };
@@ -376,12 +348,8 @@ fn iter_index_range_invalid_utf8_index_name_returns_utf8_error() {
             rtxn,
             cs.as_ptr(),
             bad.as_ptr().cast(),
-            ptr::null(),
-            0,
-            false,
-            ptr::null(),
-            0,
-            false,
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
             &raw mut iter,
         )
     };
@@ -891,12 +859,8 @@ fn count_index_range_null_txn_returns_invalid_arg() {
             ptr::null_mut(),
             cs.as_ptr(),
             idx.as_ptr(),
-            ptr::null(),
-            0,
-            false,
-            ptr::null(),
-            0,
-            false,
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
             &raw mut count,
         )
     };
@@ -915,12 +879,8 @@ fn count_index_range_null_collection_returns_invalid_arg() {
             rtxn,
             ptr::null(),
             idx.as_ptr(),
-            ptr::null(),
-            0,
-            false,
-            ptr::null(),
-            0,
-            false,
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
             &raw mut count,
         )
     };
@@ -943,12 +903,8 @@ fn count_index_range_null_index_name_returns_invalid_arg() {
             rtxn,
             cs.as_ptr(),
             ptr::null(),
-            ptr::null(),
-            0,
-            false,
-            ptr::null(),
-            0,
-            false,
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
             &raw mut count,
         )
     };
@@ -971,12 +927,8 @@ fn count_index_range_null_out_count_returns_invalid_arg() {
             rtxn,
             cs.as_ptr(),
             idx.as_ptr(),
-            ptr::null(),
-            0,
-            false,
-            ptr::null(),
-            0,
-            false,
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
             ptr::null_mut(),
         )
     };
@@ -994,18 +946,14 @@ fn count_index_range_null_lower_nonzero_len_returns_invalid_arg() {
     let cs = CString::new("c").expect("non-NUL");
     let idx = CString::new("by_x").expect("non-NUL");
     let mut count: u64 = 0;
-    // SAFETY: lower=null but lower_len=1 — invalid combo bytes_to_bound guards against.
+    // SAFETY: lower.ptr=null but lower.len=1 — invalid combo bytes_to_bound guards against.
     let code = unsafe {
         obj_count_index_range(
             rtxn,
             cs.as_ptr(),
             idx.as_ptr(),
-            ptr::null(),
-            1,
-            true,
-            ptr::null(),
-            0,
-            false,
+            ObjBound { ptr: ptr::null(), len: 1, inclusive: true },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
             &raw mut count,
         )
     };
@@ -1024,19 +972,15 @@ fn count_index_range_null_upper_nonzero_len_returns_invalid_arg() {
     let idx = CString::new("by_x").expect("non-NUL");
     let lower_key = b"\x01";
     let mut count: u64 = 0;
-    // SAFETY: upper=null but upper_len=2 — invalid combo bytes_to_bound guards against;
+    // SAFETY: upper.ptr=null but upper.len=2 — invalid combo bytes_to_bound guards against;
     // lower is a valid non-null 1-byte slice.
     let code = unsafe {
         obj_count_index_range(
             rtxn,
             cs.as_ptr(),
             idx.as_ptr(),
-            lower_key.as_ptr(),
-            lower_key.len(),
-            true,
-            ptr::null(),
-            2,
-            false,
+            ObjBound { ptr: lower_key.as_ptr(), len: lower_key.len(), inclusive: true },
+            ObjBound { ptr: ptr::null(), len: 2, inclusive: false },
             &raw mut count,
         )
     };
@@ -1060,12 +1004,8 @@ fn count_index_range_invalid_utf8_collection_returns_utf8_error() {
             rtxn,
             bad.as_ptr().cast(),
             idx.as_ptr(),
-            ptr::null(),
-            0,
-            false,
-            ptr::null(),
-            0,
-            false,
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
             &raw mut count,
         )
     };
@@ -1089,12 +1029,8 @@ fn count_index_range_invalid_utf8_index_name_returns_utf8_error() {
             rtxn,
             cs.as_ptr(),
             bad.as_ptr().cast(),
-            ptr::null(),
-            0,
-            false,
-            ptr::null(),
-            0,
-            false,
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
             &raw mut count,
         )
     };
