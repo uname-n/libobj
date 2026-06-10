@@ -106,6 +106,31 @@ typedef struct obj_write_txn_t obj_write_txn_t;
 typedef int32_t obj_error_t;
 
 /**
+ * A range bound passed by value across the C ABI.
+ *
+ * `ptr == NULL` (paired with `len == 0`) means unbounded on that side.
+ * A non-null `ptr` points to `len` order-preserving encoded key bytes;
+ * `inclusive` selects [`Bound::Included`] vs [`Bound::Excluded`].
+ * `inclusive` is ignored when `ptr` is `NULL`.
+ *
+ * cbindgen emits this as `obj_bound_t` in the generated header.
+ */
+typedef struct {
+  /**
+   * Key bytes pointer. `NULL` = unbounded.
+   */
+  const uint8_t *ptr;
+  /**
+   * Length of the key in bytes. Must be `0` when `ptr` is `NULL`.
+   */
+  uintptr_t len;
+  /**
+   * `true` → `Bound::Included`; `false` → `Bound::Excluded`.
+   */
+  bool inclusive;
+} obj_bound_t;
+
+/**
  * One secondary-index maintenance entry: the index `index_name` is
  * to gain (or lose) the document under the field key in
  * `key[0..key_len]`.
@@ -442,8 +467,8 @@ extern "C" {
  obj_error_t obj_count_all(obj_read_txn_t *txn, const char *collection, uint64_t *out_count);
 
 /**
- * Count index B-tree entries inside `[lower, upper]`. Bounds use
- * the same `(ptr, len, inclusive)` shape as [`obj_iter_index_range`].
+ * Count index B-tree entries inside the range described by `lower` and
+ * `upper`. Bound semantics match [`obj_iter_index_range`].
  *
  * # Safety
  *
@@ -453,12 +478,8 @@ extern "C" {
 obj_error_t obj_count_index_range(obj_read_txn_t *txn,
                                   const char *collection,
                                   const char *index_name,
-                                  const uint8_t *lower,
-                                  uintptr_t lower_len,
-                                  bool lower_inclusive,
-                                  const uint8_t *upper,
-                                  uintptr_t upper_len,
-                                  bool upper_inclusive,
+                                  obj_bound_t lower,
+                                  obj_bound_t upper,
                                   uint64_t *out_count);
 
 /**
@@ -838,28 +859,24 @@ obj_error_t obj_integrity_report_failure_at(const obj_integrity_report_t *report
  void obj_iter_free(obj_iter_t *iter);
 
 /**
- * Construct an iterator over the index range
- * `[lower, upper]` (bounds applied per `*_inclusive` flag) on
- * `index_name` in `collection`. `NULL` lower / upper means
- * unbounded.
+ * Construct an iterator over the index range described by `lower` and
+ * `upper` on `index_name` in `collection`. A bound with `ptr == NULL`
+ * and `len == 0` means unbounded on that side; `inclusive` selects
+ * `Included` vs `Excluded`.
  *
  * # Safety
  *
  * - `txn`, `collection`, `index_name`, `out_iter` must follow the
  *   usual non-null + NUL-terminated conventions.
- * - `lower` / `upper` may be NULL (paired with `_len = 0` and
- *   treated as unbounded) or point to `_len` readable bytes.
+ * - `lower.ptr` / `upper.ptr` may be NULL (paired with `len = 0`)
+ *   or point to `len` readable bytes.
  */
 
 obj_error_t obj_iter_index_range(obj_read_txn_t *txn,
                                  const char *collection,
                                  const char *index_name,
-                                 const uint8_t *lower,
-                                 uintptr_t lower_len,
-                                 bool lower_inclusive,
-                                 const uint8_t *upper,
-                                 uintptr_t upper_len,
-                                 bool upper_inclusive,
+                                 obj_bound_t lower,
+                                 obj_bound_t upper,
                                  obj_iter_t **out_iter);
 
 /**

@@ -44,6 +44,7 @@ prefix = ""
 item_types = ["constants", "functions", "structs", "enums", "typedefs", "opaque"]
 
 [export.rename]
+"ObjBound" = "obj_bound_t"
 
 [fn]
 prefix = ""

@@ -23,6 +23,25 @@ use crate::error::{
 use crate::lifecycle::obj_db_t;
 use crate::txn::obj_read_txn_t;
 
+/// A range bound passed by value across the C ABI.
+///
+/// `ptr == NULL` (paired with `len == 0`) means unbounded on that side.
+/// A non-null `ptr` points to `len` order-preserving encoded key bytes;
+/// `inclusive` selects [`Bound::Included`] vs [`Bound::Excluded`].
+/// `inclusive` is ignored when `ptr` is `NULL`.
+///
+/// cbindgen emits this as `obj_bound_t` in the generated header.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct ObjBound {
+    /// Key bytes pointer. `NULL` = unbounded.
+    pub ptr: *const u8,
+    /// Length of the key in bytes. Must be `0` when `ptr` is `NULL`.
+    pub len: usize,
+    /// `true` → `Bound::Included`; `false` → `Bound::Excluded`.
+    pub inclusive: bool,
+}
+
 /// Iterator concrete variants. No `dyn` — the C side sees
 /// one opaque pointer; the Rust side dispatches via this enum.
 enum IterImpl {
@@ -166,46 +185,29 @@ pub unsafe extern "C" fn obj_iter_all(
     })
 }
 
-/// Construct an iterator over the index range
-/// `[lower, upper]` (bounds applied per `*_inclusive` flag) on
-/// `index_name` in `collection`. `NULL` lower / upper means
-/// unbounded.
+/// Construct an iterator over the index range described by `lower` and
+/// `upper` on `index_name` in `collection`. A bound with `ptr == NULL`
+/// and `len == 0` means unbounded on that side; `inclusive` selects
+/// `Included` vs `Excluded`.
 ///
 /// # Safety
 ///
 /// - `txn`, `collection`, `index_name`, `out_iter` must follow the
 ///   usual non-null + NUL-terminated conventions.
-/// - `lower` / `upper` may be NULL (paired with `_len = 0` and
-///   treated as unbounded) or point to `_len` readable bytes.
+/// - `lower.ptr` / `upper.ptr` may be NULL (paired with `len = 0`)
+///   or point to `len` readable bytes.
 #[no_mangle]
-// allow: C-ABI shape — these args map 1:1 to the public header signature; grouping into a struct would break the stable ABI.
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn obj_iter_index_range(
     txn: *mut obj_read_txn_t,
     collection: *const c_char,
     index_name: *const c_char,
-    lower: *const u8,
-    lower_len: usize,
-    lower_inclusive: bool,
-    upper: *const u8,
-    upper_len: usize,
-    upper_inclusive: bool,
+    lower: ObjBound,
+    upper: ObjBound,
     out_iter: *mut *mut obj_iter_t,
 ) -> obj_error_t {
     // SAFETY: all pointer args are forwarded unchanged to iter_index_range_inner, which upholds the same # Safety contract as this fn.
     catch_ffi(OBJ_ERR_PANIC, || unsafe {
-        iter_index_range_inner(
-            txn,
-            collection,
-            index_name,
-            lower,
-            lower_len,
-            lower_inclusive,
-            upper,
-            upper_len,
-            upper_inclusive,
-            out_iter,
-        )
+        iter_index_range_inner(txn, collection, index_name, lower, upper, out_iter)
     })
 }
 
@@ -215,18 +217,12 @@ pub unsafe extern "C" fn obj_iter_index_range(
 /// # Safety
 ///
 /// Same pointer / lifetime contract as [`obj_iter_index_range`].
-// allow: C-ABI shape — mirrors the public obj_iter_index_range signature 1:1; grouping into a struct would diverge from the stable ABI.
-#[allow(clippy::too_many_arguments)]
 unsafe fn iter_index_range_inner(
     txn: *mut obj_read_txn_t,
     collection: *const c_char,
     index_name: *const c_char,
-    lower: *const u8,
-    lower_len: usize,
-    lower_inclusive: bool,
-    upper: *const u8,
-    upper_len: usize,
-    upper_inclusive: bool,
+    lower: ObjBound,
+    upper: ObjBound,
     out_iter: *mut *mut obj_iter_t,
 ) -> obj_error_t {
     if txn.is_null() || collection.is_null() || index_name.is_null() || out_iter.is_null() {
@@ -247,17 +243,8 @@ unsafe fn iter_index_range_inner(
             return code;
         }
     };
-    // SAFETY: lower/upper are either NULL (treated as unbounded) or point to their respective _len readable bytes per the # Safety contract.
-    let bounds = unsafe {
-        decode_bound_pair(
-            lower,
-            lower_len,
-            lower_inclusive,
-            upper,
-            upper_len,
-            upper_inclusive,
-        )
-    };
+    // SAFETY: lower/upper bounds are either NULL (treated as unbounded) or point to their respective len readable bytes per the # Safety contract.
+    let bounds = unsafe { decode_bound_pair(lower, upper) };
     let (lower_bound, upper_bound) = match bounds {
         Ok(pair) => pair,
         Err(code) => {
@@ -481,25 +468,19 @@ pub unsafe extern "C" fn obj_count_all(
     })
 }
 
-/// Count index B-tree entries inside `[lower, upper]`. Bounds use
-/// the same `(ptr, len, inclusive)` shape as [`obj_iter_index_range`].
+/// Count index B-tree entries inside the range described by `lower` and
+/// `upper`. Bound semantics match [`obj_iter_index_range`].
 ///
 /// # Safety
 ///
 /// As [`obj_iter_index_range`] plus `out_count` writable.
 #[no_mangle]
-// allow: C-ABI shape — these args map 1:1 to the public header signature; grouping into a struct would break the stable ABI.
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn obj_count_index_range(
     txn: *mut obj_read_txn_t,
     collection: *const c_char,
     index_name: *const c_char,
-    lower: *const u8,
-    lower_len: usize,
-    lower_inclusive: bool,
-    upper: *const u8,
-    upper_len: usize,
-    upper_inclusive: bool,
+    lower: ObjBound,
+    upper: ObjBound,
     out_count: *mut u64,
 ) -> obj_error_t {
     catch_ffi(OBJ_ERR_PANIC, || {
@@ -516,13 +497,13 @@ pub unsafe extern "C" fn obj_count_index_range(
             Ok(s) => s,
             Err(code) => return code,
         };
-        // SAFETY: lower is either NULL (treated as unbounded) or points to lower_len readable bytes per the # Safety contract.
-        let lower_bound = match unsafe { bytes_to_bound(lower, lower_len, lower_inclusive) } {
+        // SAFETY: lower.ptr is either NULL (treated as unbounded) or points to lower.len readable bytes per the # Safety contract.
+        let lower_bound = match unsafe { bytes_to_bound(lower.ptr, lower.len, lower.inclusive) } {
             Ok(b) => b,
             Err(code) => return code,
         };
-        // SAFETY: upper is either NULL (treated as unbounded) or points to upper_len readable bytes per the # Safety contract.
-        let upper_bound = match unsafe { bytes_to_bound(upper, upper_len, upper_inclusive) } {
+        // SAFETY: upper.ptr is either NULL (treated as unbounded) or points to upper.len readable bytes per the # Safety contract.
+        let upper_bound = match unsafe { bytes_to_bound(upper.ptr, upper.len, upper.inclusive) } {
             Ok(b) => b,
             Err(code) => return code,
         };
@@ -802,28 +783,17 @@ unsafe fn bytes_to_bound(
     })
 }
 
-/// Decode a `(lower, upper)` bound pair from their `(ptr, len,
-/// inclusive)` C representations in one call, so callers do not
-/// repeat the per-bound `match` arms. Returns the first decode
-/// error encountered.
+/// Decode a `(lower, upper)` [`ObjBound`] pair into a [`BoundPair`].
+/// Returns the first decode error encountered.
 ///
 /// # Safety
 ///
-/// As [`bytes_to_bound`] applied to each `(ptr, len)` pair.
-// allow: C-ABI shape — the two (ptr, len, inclusive) bound triples come straight from the public range API; a struct would diverge from that ABI.
-#[allow(clippy::too_many_arguments)]
-unsafe fn decode_bound_pair(
-    lower: *const u8,
-    lower_len: usize,
-    lower_inclusive: bool,
-    upper: *const u8,
-    upper_len: usize,
-    upper_inclusive: bool,
-) -> Result<BoundPair, obj_error_t> {
-    // SAFETY: lower is either NULL (treated as unbounded) or points to lower_len readable bytes per the # Safety contract.
-    let lower_bound = unsafe { bytes_to_bound(lower, lower_len, lower_inclusive) }?;
-    // SAFETY: upper is either NULL (treated as unbounded) or points to upper_len readable bytes per the # Safety contract.
-    let upper_bound = unsafe { bytes_to_bound(upper, upper_len, upper_inclusive) }?;
+/// As [`bytes_to_bound`] applied to each bound.
+unsafe fn decode_bound_pair(lower: ObjBound, upper: ObjBound) -> Result<BoundPair, obj_error_t> {
+    // SAFETY: lower.ptr is either NULL (treated as unbounded) or points to lower.len readable bytes per the # Safety contract.
+    let lower_bound = unsafe { bytes_to_bound(lower.ptr, lower.len, lower.inclusive) }?;
+    // SAFETY: upper.ptr is either NULL (treated as unbounded) or points to upper.len readable bytes per the # Safety contract.
+    let upper_bound = unsafe { bytes_to_bound(upper.ptr, upper.len, upper.inclusive) }?;
     Ok((lower_bound, upper_bound))
 }
 

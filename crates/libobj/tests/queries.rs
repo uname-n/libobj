@@ -22,7 +22,7 @@ use obj::{
     obj_close, obj_count_all, obj_count_index_range, obj_db_t, obj_doc_insert_raw, obj_find_unique,
     obj_free_buffer, obj_iter_all, obj_iter_free, obj_iter_index_range, obj_iter_next, obj_iter_t,
     obj_open, obj_read_txn_t, obj_txn_begin_read, obj_txn_begin_write, obj_txn_commit,
-    obj_txn_end_read, obj_write_txn_t, OBJ_ERR_NOT_FOUND, OBJ_OK,
+    obj_txn_end_read, obj_write_txn_t, ObjBound, OBJ_ERR_NOT_FOUND, OBJ_OK,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -284,12 +284,8 @@ fn iter_index_range_walks_typed_index() {
             rtxn,
             collection.as_ptr(),
             index.as_ptr(),
-            lower.as_ptr(),
-            lower.len(),
-            true,
-            upper.as_ptr(),
-            upper.len(),
-            false,
+            ObjBound { ptr: lower.as_ptr(), len: lower.len(), inclusive: true },
+            ObjBound { ptr: upper.as_ptr(), len: upper.len(), inclusive: false },
             &raw mut iter,
         )
     };
@@ -334,12 +330,8 @@ fn count_index_range_matches_iter_count() {
             rtxn,
             collection.as_ptr(),
             index.as_ptr(),
-            lower.as_ptr(),
-            lower.len(),
-            true,
-            upper.as_ptr(),
-            upper.len(),
-            true,
+            ObjBound { ptr: lower.as_ptr(), len: lower.len(), inclusive: true },
+            ObjBound { ptr: upper.as_ptr(), len: upper.len(), inclusive: true },
             &raw mut count,
         )
     };
