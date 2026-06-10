@@ -24,7 +24,7 @@ use std::ptr;
 use tempfile::TempDir;
 
 use obj::{
-    obj_close, obj_config_t, obj_db_t, obj_doc_get, obj_doc_insert_raw, obj_free_buffer, obj_open,
+    obj_buf_free, obj_close, obj_config_t, obj_db_t, obj_doc_get, obj_doc_insert_raw, obj_open,
     obj_open_with_config, obj_read_txn_t, obj_txn_begin_read, obj_txn_begin_write, obj_txn_commit,
     obj_txn_end_read, obj_write_txn_t, OBJ_ENCRYPTION_KEY_LEN, OBJ_ERR_CORRUPTION,
     OBJ_ERR_UNSUPPORTED, OBJ_OK, OBJ_SYNC_MODE_FULL,
@@ -142,7 +142,7 @@ fn encrypted_open_round_trip_via_c_abi() {
     };
     assert_eq!(code, OBJ_OK, "obj_doc_get on encrypted db returned {code}");
     let got = unsafe { std::slice::from_raw_parts(out_payload, out_len) }.to_vec();
-    unsafe { obj_free_buffer(out_payload, out_len) };
+    unsafe { obj_buf_free(out_payload) };
     assert_eq!(got.as_slice(), payload.as_slice());
     unsafe { obj_txn_end_read(rtxn) };
     unsafe { obj_close(db) };

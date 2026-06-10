@@ -33,7 +33,7 @@ use tempfile::TempDir;
 
 use obj::{
     obj_backup_to, obj_close, obj_count_all, obj_count_index_range, obj_db_t, obj_doc_insert_raw,
-    obj_find_unique, obj_free_buffer, obj_integrity_check, obj_integrity_report_failure_at,
+    obj_buf_free, obj_find_unique, obj_integrity_check, obj_integrity_report_failure_at,
     obj_integrity_report_free, obj_integrity_report_t, obj_iter_all, obj_iter_free,
     obj_iter_index_range, obj_iter_next, obj_iter_t, obj_open, obj_read_txn_t, obj_stat,
     obj_stat_t, obj_txn_begin_read, obj_txn_begin_write, obj_txn_commit, obj_txn_end_read,
@@ -468,8 +468,8 @@ fn iter_next_exhaustion_returns_not_found() {
     let code = unsafe { obj_iter_next(iter, &raw mut id, &raw mut payload, &raw mut len) };
     assert_eq!(code, OBJ_OK);
     assert!(!payload.is_null());
-    // SAFETY: payload/len from a successful obj_iter_next; must free with obj_free_buffer.
-    unsafe { obj_free_buffer(payload, len) };
+    // SAFETY: payload from a successful obj_iter_next; must free with obj_buf_free.
+    unsafe { obj_buf_free(payload) };
 
     // Next call must signal exhaustion.
     let mut id2: u64 = 0;

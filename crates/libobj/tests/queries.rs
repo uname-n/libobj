@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 
 use obj::{
-    obj_close, obj_count_all, obj_count_index_range, obj_db_t, obj_doc_insert_raw, obj_find_unique,
-    obj_free_buffer, obj_iter_all, obj_iter_free, obj_iter_index_range, obj_iter_next, obj_iter_t,
+    obj_buf_free, obj_close, obj_count_all, obj_count_index_range, obj_db_t, obj_doc_insert_raw,
+    obj_find_unique, obj_iter_all, obj_iter_free, obj_iter_index_range, obj_iter_next, obj_iter_t,
     obj_open, obj_read_txn_t, obj_txn_begin_read, obj_txn_begin_write, obj_txn_commit,
     obj_txn_end_read, obj_write_txn_t, ObjBound, OBJ_ERR_NOT_FOUND, OBJ_OK,
 };
@@ -93,7 +93,7 @@ fn drain(iter: *mut obj_iter_t) -> Vec<(u64, Vec<u8>)> {
         match code {
             OBJ_OK => {
                 let bytes = unsafe { std::slice::from_raw_parts(payload, len) }.to_vec();
-                unsafe { obj_free_buffer(payload, len) };
+                unsafe { obj_buf_free(payload) };
                 out.push((id, bytes));
             }
             OBJ_ERR_NOT_FOUND => break,
@@ -219,7 +219,7 @@ fn find_unique_locates_doc_via_typed_index() {
     assert_eq!(code, OBJ_OK);
     assert_eq!(id, target_id.get());
     let bytes = unsafe { std::slice::from_raw_parts(payload, len) }.to_vec();
-    unsafe { obj_free_buffer(payload, len) };
+    unsafe { obj_buf_free(payload) };
     assert!(!bytes.is_empty());
 
     let other_key = encode_unique_string_key("nobody@example.com");

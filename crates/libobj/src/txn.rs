@@ -66,9 +66,10 @@
 //!    `unsafe` op carries an explicit SAFETY block.
 
 use core::ffi::c_char;
-use core::mem::ManuallyDrop;
+use core::mem::{align_of, size_of, ManuallyDrop};
 use core::ptr;
 use core::slice;
+use std::alloc::{alloc, dealloc, handle_alloc_error, Layout};
 use std::ffi::CStr;
 use std::sync::Arc;
 
@@ -720,7 +721,7 @@ pub unsafe extern "C" fn obj_doc_insert_raw(
 
 /// Fetch the document at `id` in `collection`. On `OBJ_OK` the
 /// caller owns `*out_payload` (length `*out_payload_len`) and
-/// MUST free it via `obj_free_buffer`. Returns
+/// MUST free it via `obj_buf_free`. Returns
 /// `OBJ_ERR_NOT_FOUND` if the document is absent.
 ///
 /// # Safety
@@ -782,9 +783,10 @@ pub unsafe extern "C" fn obj_doc_get(
         let txn_ref = unsafe { (*txn).inner_ref() };
         match txn_ref.get_raw_bytes(collection_str, id) {
             Ok(Some(bytes)) => {
-                let (ptr, len) = box_bytes(bytes);
+                let len = bytes.len();
+                let ptr = alloc_bytes(&bytes);
                 // SAFETY: out_payload is non-null (top guard passed) and writable per the
-                // # Safety contract; ptr is the box_bytes allocation the caller frees via obj_free_buffer.
+                // # Safety contract; ptr is the alloc_bytes allocation the caller frees via obj_buf_free.
                 unsafe { *out_payload = ptr };
                 // SAFETY: out_payload_len is non-null (top guard passed) and a writable *mut usize
                 // per the # Safety contract.
@@ -961,37 +963,75 @@ pub unsafe extern "C" fn obj_doc_upsert_raw(
 }
 
 /// Free a buffer returned by an `obj_doc_get` / iteration call.
-/// Pairs with the `Box<[u8]>::into_raw` allocation done inside
-/// [`box_bytes`]. Null-tolerant; passing a `(ptr, len)` pair that
-/// did NOT come from libobj is undefined behaviour.
+/// Pairs with the [`alloc_bytes`] allocation. Null-tolerant;
+/// passing a pointer that did NOT come from libobj is undefined
+/// behaviour.
 ///
 /// # Safety
 ///
 /// - `ptr` may be NULL (no-op).
-/// - If non-null, `(ptr, len)` MUST have been produced by a prior
+/// - If non-null, `ptr` MUST have been produced by a prior
 ///   libobj call that documents this buffer-ownership convention.
 #[no_mangle]
-pub unsafe extern "C" fn obj_free_buffer(ptr: *mut u8, len: usize) {
+pub unsafe extern "C" fn obj_buf_free(ptr: *mut u8) {
+    // SAFETY: ptr is either null (tolerated) or a valid alloc_bytes allocation
+    // per the # Safety contract.
+    unsafe { dealloc_bytes(ptr) };
+}
+
+/// Allocate a length-prefixed buffer: write `data.len()` as a `usize`
+/// header, copy `data` after it, and return a pointer to the data region.
+/// The caller MUST free via [`dealloc_bytes`] / [`obj_buf_free`].
+pub(crate) fn alloc_bytes(data: &[u8]) -> *mut u8 {
+    let Some(total) = size_of::<usize>().checked_add(data.len()) else {
+        handle_alloc_error(Layout::new::<u8>())
+    };
+    // unreachable error: align_of::<usize>() is always a valid power-of-two alignment
+    let Ok(layout) = Layout::from_size_align(total, align_of::<usize>()) else {
+        handle_alloc_error(Layout::new::<u8>())
+    };
+    // SAFETY: layout has non-zero size (total >= size_of::<usize>() >= 1).
+    let base = unsafe { alloc(layout) };
+    if base.is_null() {
+        handle_alloc_error(layout);
+    }
+    // SAFETY: base is valid for `total` bytes; write_unaligned avoids requiring usize-alignment
+    // on the raw pointer (the layout already aligns to align_of::<usize>(), but the cast would
+    // trigger cast_ptr_alignment; write_unaligned is correct here regardless).
+    unsafe { ptr::write_unaligned(base.cast::<usize>(), data.len()) };
+    if !data.is_empty() {
+        // SAFETY: base + size_of::<usize>() is within the allocation; data is data.len() bytes.
+        unsafe {
+            base.add(size_of::<usize>())
+                .copy_from_nonoverlapping(data.as_ptr(), data.len());
+        }
+    }
+    // SAFETY: base + size_of::<usize>() is within the allocation (total >= size_of::<usize>()).
+    unsafe { base.add(size_of::<usize>()) }
+}
+
+/// Deallocate a buffer produced by [`alloc_bytes`]. Null-tolerant.
+///
+/// # Safety
+///
+/// If non-null, `ptr` must have been returned by [`alloc_bytes`] and
+/// not yet freed.
+pub(crate) unsafe fn dealloc_bytes(ptr: *mut u8) {
     if ptr.is_null() {
         return;
     }
-    catch_ffi_void(|| {
-        // SAFETY: ptr is non-null (checked above) and, per the # Safety contract, (ptr, len) came
-        // from a prior libobj box_bytes allocation, so it is a valid [u8] of length len.
-        let slice = unsafe { slice::from_raw_parts_mut(ptr, len) };
-        // SAFETY: the slice points to a Box<[u8]> produced by box_bytes (Box::into_raw); reclaiming
-        // it here frees that allocation exactly once.
-        let _ = unsafe { Box::from_raw(std::ptr::from_mut::<[u8]>(slice)) };
-    });
-}
-
-/// Allocate a `Vec<u8>` as a `Box<[u8]>` and return its
-/// (pointer, length). The C caller MUST free via [`obj_free_buffer`].
-pub(crate) fn box_bytes(v: Vec<u8>) -> (*mut u8, usize) {
-    let boxed: Box<[u8]> = v.into_boxed_slice();
-    let len = boxed.len();
-    let raw = Box::into_raw(boxed).cast::<u8>();
-    (raw, len)
+    // SAFETY: ptr was returned by alloc_bytes as base + size_of::<usize>(); subtracting recovers base.
+    let base = unsafe { ptr.sub(size_of::<usize>()) };
+    // SAFETY: base points to the usize written by alloc_bytes via write_unaligned; read_unaligned matches.
+    let len = unsafe { ptr::read_unaligned(base.cast::<usize>()) };
+    // cannot overflow: alloc_bytes checked the sum before allocating
+    let total = size_of::<usize>() + len;
+    // unreachable error: same layout as alloc_bytes constructed
+    let Ok(layout) = Layout::from_size_align(total, align_of::<usize>()) else {
+        handle_alloc_error(Layout::new::<u8>())
+    };
+    // SAFETY: base and layout exactly match those used by alloc_bytes.
+    unsafe { dealloc(base, layout) };
 }
 
 /// Convert a NUL-terminated C string to a `&str`. Returns

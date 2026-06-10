@@ -445,6 +445,20 @@ extern "C" {
  obj_error_t obj_backup_to(obj_db_t *db, const char *dest);
 
 /**
+ * Free a buffer returned by an `obj_doc_get` / iteration call.
+ * Pairs with the [`alloc_bytes`] allocation. Null-tolerant;
+ * passing a pointer that did NOT come from libobj is undefined
+ * behaviour.
+ *
+ * # Safety
+ *
+ * - `ptr` may be NULL (no-op).
+ * - If non-null, `ptr` MUST have been produced by a prior
+ *   libobj call that documents this buffer-ownership convention.
+ */
+ void obj_buf_free(uint8_t *ptr);
+
+/**
  * Close a database handle. Null-tolerant.
  *
  * # Safety
@@ -525,7 +539,7 @@ obj_error_t obj_doc_delete_indexed(obj_write_txn_t *txn,
 /**
  * Fetch the document at `id` in `collection`. On `OBJ_OK` the
  * caller owns `*out_payload` (length `*out_payload_len`) and
- * MUST free it via `obj_free_buffer`. Returns
+ * MUST free it via `obj_buf_free`. Returns
  * `OBJ_ERR_NOT_FOUND` if the document is absent.
  *
  * # Safety
@@ -705,20 +719,6 @@ obj_error_t obj_find_unique(obj_read_txn_t *txn,
                             uintptr_t *out_payload_len);
 
 /**
- * Free a buffer returned by an `obj_doc_get` / iteration call.
- * Pairs with the `Box<[u8]>::into_raw` allocation done inside
- * [`box_bytes`]. Null-tolerant; passing a `(ptr, len)` pair that
- * did NOT come from libobj is undefined behaviour.
- *
- * # Safety
- *
- * - `ptr` may be NULL (no-op).
- * - If non-null, `(ptr, len)` MUST have been produced by a prior
- *   libobj call that documents this buffer-ownership convention.
- */
- void obj_free_buffer(uint8_t *ptr, uintptr_t len);
-
-/**
  * Encode a single index field `value` into obj's order-preserving
  * field-key bytes, writing the result into the caller's `out`
  * buffer.
@@ -780,7 +780,7 @@ obj_error_t obj_index_key_encode(obj_index_value_kind_t kind,
 
 /**
  * Copy the Debug-formatted text of failure `index` into a fresh
- * libobj-owned buffer. Caller pairs with `obj_free_buffer`.
+ * libobj-owned buffer. Caller pairs with `obj_buf_free`.
  * Returns `OBJ_ERR_NOT_FOUND` for an out-of-range index.
  *
  * # Safety
@@ -882,7 +882,7 @@ obj_error_t obj_iter_index_range(obj_read_txn_t *txn,
 /**
  * Step the iterator. On `OBJ_OK` the caller owns `*out_payload`
  * (length `*out_payload_len`) and MUST free it with
- * `obj_free_buffer`. Returns `OBJ_ERR_NOT_FOUND` at end-of-
+ * `obj_buf_free`. Returns `OBJ_ERR_NOT_FOUND` at end-of-
  * iteration; a real engine failure surfaces as the corresponding
  * error code.
  *

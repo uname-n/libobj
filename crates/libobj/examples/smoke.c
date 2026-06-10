@@ -118,12 +118,12 @@ int main(void) {
             fprintf(stderr,
                     "smoke: payload mismatch at id=%llu: got %zu bytes, expected %zu\n",
                     (unsigned long long)ids[i], out_len, expected_len);
-            obj_free_buffer(out_payload, out_len);
+            obj_buf_free(out_payload);
             obj_txn_end_read(rtxn);
             obj_close(db);
             return 1;
         }
-        obj_free_buffer(out_payload, out_len);
+        obj_buf_free(out_payload);
     }
     obj_txn_end_read(rtxn);
 
@@ -153,7 +153,7 @@ int main(void) {
             obj_close(db);
             return fail("obj_iter_next", code);
         }
-        obj_free_buffer(p, plen);
+        obj_buf_free(p);
         seen++;
         if (seen > DOC_COUNT) break;
     }

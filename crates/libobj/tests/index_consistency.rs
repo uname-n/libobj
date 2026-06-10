@@ -34,7 +34,7 @@ use tempfile::TempDir;
 
 use obj::{
     obj_close, obj_db_t, obj_doc_delete_indexed, obj_doc_get, obj_doc_insert_raw,
-    obj_doc_insert_indexed, obj_doc_update_indexed, obj_find_unique, obj_free_buffer,
+    obj_buf_free, obj_doc_insert_indexed, obj_doc_update_indexed, obj_find_unique,
     obj_index_entry_t, obj_index_key_encode, obj_iter_free, obj_iter_index_range, obj_iter_next,
     obj_iter_t, obj_open, obj_read_txn_t, obj_txn_begin_read, obj_txn_begin_write, obj_txn_commit,
     obj_txn_end_read, obj_txn_rollback, obj_write_txn_t, ObjBound, OBJ_ERR_INVALID_ARG,
@@ -179,7 +179,7 @@ fn c_plain_writes_stay_primary_only() {
     let code = unsafe { obj_doc_get(rtxn, cs.as_ptr(), c_id, &raw mut payload, &raw mut len) };
     assert_eq!(code, OBJ_OK, "C-written doc must be fetchable by id");
     let bytes = unsafe { std::slice::from_raw_parts(payload, len) }.to_vec();
-    unsafe { obj_free_buffer(payload, len) };
+    unsafe { obj_buf_free(payload) };
     assert_eq!(bytes.as_slice(), c_payload.as_slice());
 
     let found = find_unique(rtxn, "customers", "by_email", &string_key(c_email));
@@ -489,7 +489,7 @@ fn find_unique(
     match code {
         OBJ_OK => {
             if !payload.is_null() {
-                unsafe { obj_free_buffer(payload, len) };
+                unsafe { obj_buf_free(payload) };
             }
             Some(id)
         }
@@ -529,7 +529,7 @@ fn index_range_ids(
         match code {
             OBJ_OK => {
                 if !payload.is_null() {
-                    unsafe { obj_free_buffer(payload, len) };
+                    unsafe { obj_buf_free(payload) };
                 }
                 ids.push(id);
             }

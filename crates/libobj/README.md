@@ -48,7 +48,7 @@ obj_read_txn_t *rtxn = NULL;
 obj_txn_begin_read(db, &rtxn);
 uint8_t *out = NULL; size_t out_len = 0;
 obj_doc_get(rtxn, "orders", id, &out, &out_len);
-obj_free_buffer(out, out_len);        // caller frees engine buffers
+obj_buf_free(out);                    // caller frees engine buffers
 obj_txn_end_read(rtxn);
 
 obj_close(db);
@@ -71,11 +71,11 @@ for you. Encode however you like and pass the bytes through.
 | Diagnostics   | `obj_stat`, `obj_integrity_check` (+ `obj_integrity_report_*`)        |
 | Operations    | `obj_backup_to`                                                      |
 | Errors        | `obj_strerror`, the `obj_error_t` enum (`OBJ_OK`, `OBJ_ERR_*`)        |
-| Memory        | `obj_free_buffer` — frees every buffer the engine hands back         |
+| Memory        | `obj_buf_free` — frees every buffer the engine hands back            |
 
 Every function returns an `obj_error_t`; check it against `OBJ_OK`.
 Buffers returned through out-pointers are owned by the caller and must
-be released with `obj_free_buffer`. The generated `libobj.h` is the
+be released with `obj_buf_free`. The generated `libobj.h` is the
 authoritative signature reference.
 
 ---

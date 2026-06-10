@@ -11,7 +11,7 @@ use std::ptr;
 use tempfile::TempDir;
 
 use obj::{
-    obj_backup_to, obj_close, obj_db_t, obj_doc_insert_raw, obj_free_buffer, obj_integrity_check,
+    obj_backup_to, obj_buf_free, obj_close, obj_db_t, obj_doc_insert_raw, obj_integrity_check,
     obj_integrity_report_failure_at, obj_integrity_report_failure_count, obj_integrity_report_free,
     obj_integrity_report_is_ok, obj_integrity_report_pages_checked, obj_integrity_report_t,
     obj_open, obj_stat, obj_stat_t, obj_txn_begin_write, obj_txn_commit, OBJ_ERR_INTEGRITY, OBJ_OK,
@@ -151,7 +151,7 @@ fn integrity_check_surfaces_corruption_after_byte_flip() {
         assert_eq!(code, OBJ_OK);
         assert!(!out_str.is_null());
         let bytes = unsafe { std::slice::from_raw_parts(out_str, out_len) }.to_vec();
-        unsafe { obj_free_buffer(out_str, out_len) };
+        unsafe { obj_buf_free(out_str) };
         assert!(!bytes.is_empty());
     }
     if !report.is_null() {
