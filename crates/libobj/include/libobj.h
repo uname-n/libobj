@@ -27,6 +27,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
+/**
+ * Maximum number of bytes that `obj_index_key_encode` can write for a
+ * value of `value_len` raw bytes. Use this to size a stack buffer for
+ * the encode call without the two-call size-query idiom: an encoded
+ * field is at most `value_len + 5` bytes for any kind and any length.
+ */
+#define OBJ_INDEX_KEY_CAP(value_len) ((size_t)(value_len) + 5)
+
 
 /**
  * Length in bytes of the [`obj_config_t::encryption_key`] field.
