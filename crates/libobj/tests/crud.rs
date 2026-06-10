@@ -14,7 +14,7 @@ use tempfile::TempDir;
 
 use obj::{
     obj_close, obj_db_t, obj_doc_delete_raw, obj_doc_get, obj_doc_insert_raw, obj_doc_update_raw,
-    obj_doc_upsert_raw, obj_free_buffer, obj_open, obj_read_txn_t, obj_txn_begin_read,
+    obj_buf_free, obj_doc_upsert_raw, obj_open, obj_read_txn_t, obj_txn_begin_read,
     obj_txn_begin_write, obj_txn_commit, obj_txn_end_read, obj_txn_rollback, obj_write_txn_t,
     OBJ_ERR_INVALID_ARG, OBJ_ERR_NOT_FOUND, OBJ_OK,
 };
@@ -79,7 +79,7 @@ fn get(txn: *mut obj_read_txn_t, collection: &str, id: u64) -> Option<Vec<u8>> {
     match code {
         OBJ_OK => {
             let bytes = unsafe { std::slice::from_raw_parts(payload, len) }.to_vec();
-            unsafe { obj_free_buffer(payload, len) };
+            unsafe { obj_buf_free(payload) };
             Some(bytes)
         }
         OBJ_ERR_NOT_FOUND => None,
@@ -233,7 +233,7 @@ fn null_payload_with_zero_len_is_accepted() {
 
 #[test]
 fn free_buffer_is_null_tolerant() {
-    unsafe { obj_free_buffer(ptr::null_mut(), 0) };
+    unsafe { obj_buf_free(ptr::null_mut()) };
 }
 
 #[test]

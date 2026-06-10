@@ -12,8 +12,8 @@
 //!   etc.) returned by this library are obtained by leaking a
 //!   `Box<T>`. The corresponding `obj_*_close` / `_free` /
 //!   `_rollback` calls reclaim ownership via [`Box::from_raw`].
-//! - All byte buffers returned from this library are allocated as
-//!   `Box<[u8]>` and MUST be freed via `obj_free_buffer`.
+//! - All byte buffers returned from this library carry an embedded
+//!   length header and MUST be freed via `obj_buf_free`.
 //!   Mixing Rust's allocator with C's `malloc` is undefined.
 //! - Null handles are treated specifically per function: close /
 //!   free / rollback are null-tolerant (no-op); every other entry
@@ -71,7 +71,7 @@ pub use queries::{
 pub use txn::{
     obj_doc_delete_raw, obj_doc_delete_indexed, obj_doc_get, obj_doc_insert_raw,
     obj_doc_insert_indexed, obj_doc_update_raw, obj_doc_update_indexed, obj_doc_upsert_raw,
-    obj_free_buffer, obj_index_entry_t,
+    obj_buf_free, obj_index_entry_t,
     obj_read_txn_t, obj_txn_begin_read, obj_txn_begin_write, obj_txn_commit, obj_txn_end_read,
     obj_txn_rollback, obj_write_txn_t,
 };

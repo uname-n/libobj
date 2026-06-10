@@ -13,7 +13,7 @@ use std::ptr;
 use tempfile::TempDir;
 
 use obj::{
-    obj_close, obj_db_t, obj_doc_get, obj_doc_insert_raw, obj_free_buffer, obj_iter_all, obj_iter_free,
+    obj_buf_free, obj_close, obj_db_t, obj_doc_get, obj_doc_insert_raw, obj_iter_all, obj_iter_free,
     obj_iter_next, obj_iter_t, obj_open, obj_read_txn_t, obj_txn_begin_read, obj_txn_begin_write,
     obj_txn_commit, obj_txn_end_read, obj_txn_rollback, obj_write_txn_t, OBJ_ERR_NOT_FOUND, OBJ_OK,
 };
@@ -74,7 +74,7 @@ fn lookup_count(txn: *mut obj_read_txn_t, collection: &str, ids: &[u64]) -> usiz
             OBJ_OK => {
                 present += 1;
                 if !payload.is_null() {
-                    unsafe { obj_free_buffer(payload, len) };
+                    unsafe { obj_buf_free(payload) };
                 }
             }
             OBJ_ERR_NOT_FOUND => {}
@@ -99,7 +99,7 @@ fn iter_all_ids(txn: *mut obj_read_txn_t, collection: &str) -> Vec<u64> {
             break;
         }
         assert_eq!(code, OBJ_OK);
-        unsafe { obj_free_buffer(payload, len) };
+        unsafe { obj_buf_free(payload) };
         ids.push(id);
     }
     unsafe { obj_iter_free(iter) };

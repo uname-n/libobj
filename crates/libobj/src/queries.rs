@@ -284,7 +284,7 @@ unsafe fn iter_index_range_inner(
 
 /// Step the iterator. On `OBJ_OK` the caller owns `*out_payload`
 /// (length `*out_payload_len`) and MUST free it with
-/// `obj_free_buffer`. Returns `OBJ_ERR_NOT_FOUND` at end-of-
+/// `obj_buf_free`. Returns `OBJ_ERR_NOT_FOUND` at end-of-
 /// iteration; a real engine failure surfaces as the corresponding
 /// error code.
 ///
@@ -315,10 +315,11 @@ pub unsafe extern "C" fn obj_iter_next(
         // SAFETY: iter is non-null (checked above) and a live iterator handle per the # Safety contract.
         let step = unsafe { (*iter).step() };
         if let Some((id, payload)) = step {
-            let (ptr, len) = crate::txn::box_bytes(payload);
+            let len = payload.len();
+            let ptr = crate::txn::alloc_bytes(&payload);
             // SAFETY: out_id, out_payload, out_payload_len are non-null (checked above) and writable per the # Safety contract.
             unsafe { *out_id = id };
-            // SAFETY: out_payload is non-null (checked above) and writable; ptr is a fresh box_bytes buffer owned by the caller.
+            // SAFETY: out_payload is non-null (checked above) and writable; ptr is a fresh alloc_bytes buffer owned by the caller.
             unsafe { *out_payload = ptr };
             // SAFETY: out_payload_len is non-null (checked above) and writable per the # Safety contract.
             unsafe { *out_payload_len = len };
@@ -413,10 +414,11 @@ pub unsafe extern "C" fn obj_find_unique(
         let txn_ref = unsafe { (*txn).inner_ref() };
         match txn_ref.find_unique_raw(collection_str, index_str, key_slice) {
             Ok(Some((id, payload))) => {
-                let (ptr, len) = crate::txn::box_bytes(payload);
+                let len = payload.len();
+                let ptr = crate::txn::alloc_bytes(&payload);
                 // SAFETY: out_id is non-null (checked above) and writable per the # Safety contract.
                 unsafe { *out_id = id.get() };
-                // SAFETY: out_payload is non-null (checked above) and writable; ptr is a fresh box_bytes buffer owned by the caller.
+                // SAFETY: out_payload is non-null (checked above) and writable; ptr is a fresh alloc_bytes buffer owned by the caller.
                 unsafe { *out_payload = ptr };
                 // SAFETY: out_payload_len is non-null (checked above) and writable per the # Safety contract.
                 unsafe { *out_payload_len = len };
@@ -626,7 +628,7 @@ pub unsafe extern "C" fn obj_integrity_report_failure_count(
 }
 
 /// Copy the Debug-formatted text of failure `index` into a fresh
-/// libobj-owned buffer. Caller pairs with `obj_free_buffer`.
+/// libobj-owned buffer. Caller pairs with `obj_buf_free`.
 /// Returns `OBJ_ERR_NOT_FOUND` for an out-of-range index.
 ///
 /// # Safety
@@ -655,8 +657,9 @@ pub unsafe extern "C" fn obj_integrity_report_failure_at(
         // SAFETY: report is non-null (checked above) and a live obj_integrity_report_t handle per the # Safety contract.
         let failures_ref: &Vec<String> = unsafe { &(*report).failures };
         if let Some(s) = failures_ref.get(index) {
-            let (ptr, len) = crate::txn::box_bytes(s.as_bytes().to_vec());
-            // SAFETY: out_string is non-null (checked above) and writable; ptr is a fresh box_bytes buffer owned by the caller.
+            let len = s.len();
+            let ptr = crate::txn::alloc_bytes(s.as_bytes());
+            // SAFETY: out_string is non-null (checked above) and writable; ptr is a fresh alloc_bytes buffer owned by the caller.
             unsafe { *out_string = ptr };
             // SAFETY: out_string_len is non-null (checked above) and writable per the # Safety contract.
             unsafe { *out_string_len = len };
