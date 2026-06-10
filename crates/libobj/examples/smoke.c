@@ -79,13 +79,13 @@ int main(void) {
     for (int i = 0; i < DOC_COUNT; i++) {
         const char *payload = PAYLOADS[i];
         size_t len = strlen(payload);
-        code = obj_doc_insert(wtxn, "smoke",
+        code = obj_doc_insert_raw(wtxn, "smoke",
                               (const uint8_t *)payload, len,
                               &ids[i]);
         if (code != OBJ_OK) {
             obj_txn_rollback(wtxn);
             obj_close(db);
-            return fail("obj_doc_insert", code);
+            return fail("obj_doc_insert_raw", code);
         }
     }
     code = obj_txn_commit(wtxn);

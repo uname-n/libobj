@@ -13,7 +13,7 @@ use std::ptr;
 use tempfile::TempDir;
 
 use obj::{
-    obj_close, obj_db_t, obj_doc_get, obj_doc_insert, obj_free_buffer, obj_iter_all, obj_iter_free,
+    obj_close, obj_db_t, obj_doc_get, obj_doc_insert_raw, obj_free_buffer, obj_iter_all, obj_iter_free,
     obj_iter_next, obj_iter_t, obj_open, obj_read_txn_t, obj_txn_begin_read, obj_txn_begin_write,
     obj_txn_commit, obj_txn_end_read, obj_txn_rollback, obj_write_txn_t, OBJ_ERR_NOT_FOUND, OBJ_OK,
 };
@@ -49,7 +49,7 @@ fn insert(txn: *mut obj_write_txn_t, collection: &str, payload: &[u8]) -> u64 {
     let cs = CString::new(collection).expect("non-NUL");
     let mut id: u64 = 0;
     let code = unsafe {
-        obj_doc_insert(
+        obj_doc_insert_raw(
             txn,
             cs.as_ptr(),
             payload.as_ptr(),

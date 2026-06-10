@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 
 use obj::{
-    obj_close, obj_count_all, obj_count_index_range, obj_db_t, obj_doc_insert, obj_find_unique,
+    obj_close, obj_count_all, obj_count_index_range, obj_db_t, obj_doc_insert_raw, obj_find_unique,
     obj_free_buffer, obj_iter_all, obj_iter_free, obj_iter_index_range, obj_iter_next, obj_iter_t,
     obj_open, obj_read_txn_t, obj_txn_begin_read, obj_txn_begin_write, obj_txn_commit,
     obj_txn_end_read, obj_write_txn_t, OBJ_ERR_NOT_FOUND, OBJ_OK,
@@ -116,7 +116,7 @@ fn iter_all_visits_every_inserted_doc() {
         let payload = [i];
         let mut id: u64 = 0;
         let code = unsafe {
-            obj_doc_insert(
+            obj_doc_insert_raw(
                 txn,
                 collection.as_ptr(),
                 payload.as_ptr(),
@@ -156,7 +156,7 @@ fn count_all_matches_inserted() {
     for _ in 0..7 {
         let mut id: u64 = 0;
         let code =
-            unsafe { obj_doc_insert(txn, collection.as_ptr(), b"x".as_ptr(), 1, &raw mut id) };
+            unsafe { obj_doc_insert_raw(txn, collection.as_ptr(), b"x".as_ptr(), 1, &raw mut id) };
         assert_eq!(code, OBJ_OK);
     }
     let code = unsafe { obj_txn_commit(txn) };

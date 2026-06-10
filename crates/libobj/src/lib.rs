@@ -69,8 +69,9 @@ pub use queries::{
     obj_stat_t,
 };
 pub use txn::{
-    obj_doc_delete, obj_doc_delete_indexed, obj_doc_get, obj_doc_insert, obj_doc_insert_indexed,
-    obj_doc_update, obj_doc_update_indexed, obj_doc_upsert, obj_free_buffer, obj_index_entry_t,
+    obj_doc_delete_raw, obj_doc_delete_indexed, obj_doc_get, obj_doc_insert_raw,
+    obj_doc_insert_indexed, obj_doc_update_raw, obj_doc_update_indexed, obj_doc_upsert_raw,
+    obj_free_buffer, obj_index_entry_t,
     obj_read_txn_t, obj_txn_begin_read, obj_txn_begin_write, obj_txn_commit, obj_txn_end_read,
     obj_txn_rollback, obj_write_txn_t,
 };

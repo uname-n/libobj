@@ -6,8 +6,8 @@
 //!
 //! # Two write families: primary-only vs index-maintaining
 //!
-//! The plain `obj_doc_insert` / `obj_doc_update` / `obj_doc_upsert` /
-//! `obj_doc_delete` entry points write the **primary** record only —
+//! The plain `obj_doc_insert_raw` / `obj_doc_update_raw` / `obj_doc_upsert_raw` /
+//! `obj_doc_delete_raw` entry points write the **primary** record only —
 //! they deliberately do NOT touch any secondary index. They remain
 //! the right choice for a collection with no secondary indexes, or
 //! when the caller does not need its writes reflected in the
@@ -310,7 +310,7 @@ pub unsafe extern "C" fn obj_txn_end_read(txn: *mut obj_read_txn_t) {
 
 /// `type_version` stamped on documents written through the C ABI
 /// raw-bytes path. Mirrors `obj-rs`'s crate-private
-/// `RAW_BYTES_TYPE_VERSION`; the plain `obj_doc_insert` family and
+/// `RAW_BYTES_TYPE_VERSION`; the plain `obj_doc_insert_raw` family and
 /// the index-maintaining `obj_doc_*_indexed` family both stamp this
 /// so a doc inserted one way and read the other observes the same
 /// header version.
@@ -344,7 +344,7 @@ pub struct obj_index_entry_t {
 /// named secondary indexes from the caller-supplied entries. On
 /// success `*out_id` is set to the freshly-allocated id.
 ///
-/// Unlike [`obj_doc_insert`] (primary record only), this is the
+/// Unlike [`obj_doc_insert_raw`] (primary record only), this is the
 /// index-maintaining write: each `entries[i]` names an
 /// index and supplies the order-preserving field key (build it with
 /// [`obj_index_key_encode`](crate::obj_index_key_encode)) the document
@@ -676,7 +676,7 @@ unsafe fn entries_from_c(
 ///   must point to `payload_len` readable bytes.
 /// - `out_id` must be a writable `uint64_t *`.
 #[no_mangle]
-pub unsafe extern "C" fn obj_doc_insert(
+pub unsafe extern "C" fn obj_doc_insert_raw(
     txn: *mut obj_write_txn_t,
     collection: *const c_char,
     payload: *const u8,
@@ -822,10 +822,10 @@ pub unsafe extern "C" fn obj_doc_get(
 ///
 /// # Safety
 ///
-/// As [`obj_doc_insert`] plus: `id` must have been returned by a
-/// prior `obj_doc_insert` against the same collection.
+/// As [`obj_doc_insert_raw`] plus: `id` must have been returned by a
+/// prior `obj_doc_insert_raw` against the same collection.
 #[no_mangle]
-pub unsafe extern "C" fn obj_doc_update(
+pub unsafe extern "C" fn obj_doc_update_raw(
     txn: *mut obj_write_txn_t,
     collection: *const c_char,
     id: u64,
@@ -875,9 +875,9 @@ pub unsafe extern "C" fn obj_doc_update(
 ///
 /// # Safety
 ///
-/// As [`obj_doc_update`].
+/// As [`obj_doc_update_raw`].
 #[no_mangle]
-pub unsafe extern "C" fn obj_doc_delete(
+pub unsafe extern "C" fn obj_doc_delete_raw(
     txn: *mut obj_write_txn_t,
     collection: *const c_char,
     id: u64,
@@ -918,9 +918,9 @@ pub unsafe extern "C" fn obj_doc_delete(
 ///
 /// # Safety
 ///
-/// As [`obj_doc_insert`].
+/// As [`obj_doc_insert_raw`].
 #[no_mangle]
-pub unsafe extern "C" fn obj_doc_upsert(
+pub unsafe extern "C" fn obj_doc_upsert_raw(
     txn: *mut obj_write_txn_t,
     collection: *const c_char,
     id: u64,

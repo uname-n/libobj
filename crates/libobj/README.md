@@ -41,7 +41,7 @@ obj_open("app.obj", &db);
 obj_write_txn_t *wtxn = NULL;
 obj_txn_begin_write(db, &wtxn);
 uint64_t id;
-obj_doc_insert(wtxn, "orders", payload, payload_len, &id);
+obj_doc_insert_raw(wtxn, "orders", payload, payload_len, &id);
 obj_txn_commit(wtxn);                 // one fsync for the batch
 
 obj_read_txn_t *rtxn = NULL;
@@ -65,7 +65,7 @@ for you. Encode however you like and pass the bytes through.
 |---------------|----------------------------------------------------------------------|
 | Lifecycle     | `obj_open`, `obj_open_with_config`, `obj_close`                       |
 | Transactions  | `obj_txn_begin_write` / `_commit` / `_rollback`, `obj_txn_begin_read` / `_end_read` |
-| Documents     | `obj_doc_insert` / `_get` / `_update` / `_delete` / `_upsert` (+ `_indexed` variants) |
+| Documents     | `obj_doc_insert_raw` / `_get` / `_update_raw` / `_delete_raw` / `_upsert_raw` (+ `_indexed` variants) |
 | Iteration     | `obj_iter_all`, `obj_iter_index_range`, `obj_iter_next` / `_free`     |
 | Lookups       | `obj_find_unique`, `obj_count_all`, `obj_count_index_range`           |
 | Diagnostics   | `obj_stat`, `obj_integrity_check` (+ `obj_integrity_report_*`)        |

@@ -32,7 +32,7 @@ use std::ptr;
 use tempfile::TempDir;
 
 use obj::{
-    obj_backup_to, obj_close, obj_count_all, obj_count_index_range, obj_db_t, obj_doc_insert,
+    obj_backup_to, obj_close, obj_count_all, obj_count_index_range, obj_db_t, obj_doc_insert_raw,
     obj_find_unique, obj_free_buffer, obj_integrity_check, obj_integrity_report_failure_at,
     obj_integrity_report_free, obj_integrity_report_t, obj_iter_all, obj_iter_free,
     obj_iter_index_range, obj_iter_next, obj_iter_t, obj_open, obj_read_txn_t, obj_stat,
@@ -83,7 +83,7 @@ fn seed_one_doc(db: *mut obj_db_t, coll: &str) -> u64 {
     let cs = CString::new(coll).expect("non-NUL");
     let mut id: u64 = 0;
     // SAFETY: all args valid.
-    let code = unsafe { obj_doc_insert(txn, cs.as_ptr(), b"x".as_ptr(), 1, &raw mut id) };
+    let code = unsafe { obj_doc_insert_raw(txn, cs.as_ptr(), b"x".as_ptr(), 1, &raw mut id) };
     assert_eq!(code, OBJ_OK);
     // SAFETY: txn valid and not yet committed.
     let code = unsafe { obj_txn_commit(txn) };

@@ -2,7 +2,7 @@
 //!
 //! There are TWO C write families:
 //!
-//! - the PRIMARY-ONLY family (`obj_doc_insert` etc.) writes the
+//! - the PRIMARY-ONLY family (`obj_doc_insert_raw` etc.) writes the
 //!   primary record only — it does not maintain secondary indexes, so
 //!   a doc written this way is invisible to `obj_find_unique` /
 //!   `obj_iter_index_range`. [`c_plain_writes_stay_primary_only`]
@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 
 use obj::{
-    obj_close, obj_db_t, obj_doc_delete_indexed, obj_doc_get, obj_doc_insert,
+    obj_close, obj_db_t, obj_doc_delete_indexed, obj_doc_get, obj_doc_insert_raw,
     obj_doc_insert_indexed, obj_doc_update_indexed, obj_find_unique, obj_free_buffer,
     obj_index_entry_t, obj_index_key_encode, obj_iter_free, obj_iter_index_range, obj_iter_next,
     obj_iter_t, obj_open, obj_read_txn_t, obj_txn_begin_read, obj_txn_begin_write, obj_txn_commit,
@@ -140,7 +140,7 @@ fn u64_key(n: u64) -> Vec<u8> {
     encode_field_key(OBJ_INDEX_VALUE_U64, &n.to_ne_bytes())
 }
 
-/// Plain `obj_doc_insert` writes the primary record only — the doc is
+/// Plain `obj_doc_insert_raw` writes the primary record only — the doc is
 /// fetchable by id but NOT discoverable through `by_email`. (The
 /// primary-only family is the documented baseline.)
 #[test]
@@ -157,7 +157,7 @@ fn c_plain_writes_stay_primary_only() {
         let cs = CString::new("customers").expect("non-NUL");
         let mut id: u64 = 0;
         let code = unsafe {
-            obj_doc_insert(
+            obj_doc_insert_raw(
                 txn,
                 cs.as_ptr(),
                 c_payload.as_ptr(),
@@ -185,7 +185,7 @@ fn c_plain_writes_stay_primary_only() {
     let found = find_unique(rtxn, "customers", "by_email", &string_key(c_email));
     assert_eq!(
         found, None,
-        "plain obj_doc_insert must NOT appear in the typed secondary index \
+        "plain obj_doc_insert_raw must NOT appear in the typed secondary index \
          (primary-only family); use obj_doc_insert_indexed for index maintenance"
     );
 

@@ -5,12 +5,12 @@
 //! - Null handle / null out-pointer arguments to `obj_txn_begin_write`,
 //!   `obj_txn_begin_read`, `obj_txn_commit`, and `obj_txn_end_read`.
 //! - Null handle / null collection / null out-pointer to every raw-bytes
-//!   CRUD function (`obj_doc_insert`, `obj_doc_get`, `obj_doc_update`,
-//!   `obj_doc_delete`, `obj_doc_upsert`).
+//!   CRUD function (`obj_doc_insert_raw`, `obj_doc_get`, `obj_doc_update_raw`,
+//!   `obj_doc_delete_raw`, `obj_doc_upsert_raw`).
 //! - Invalid `(payload, payload_len)` combinations (null pointer with
 //!   non-zero length).
-//! - Invalid id `0` on `obj_doc_get`, `obj_doc_update`, `obj_doc_delete`,
-//!   `obj_doc_upsert`.
+//! - Invalid id `0` on `obj_doc_get`, `obj_doc_update_raw`, `obj_doc_delete_raw`,
+//!   `obj_doc_upsert_raw`.
 //! - Invalid UTF-8 collection names.
 //! - Null handle / null collection / null out-pointer to the indexed
 //!   write family (`obj_doc_insert_indexed`, `obj_doc_update_indexed`,
@@ -29,8 +29,8 @@ use std::ptr;
 use tempfile::TempDir;
 
 use obj::{
-    obj_close, obj_db_t, obj_doc_delete, obj_doc_delete_indexed, obj_doc_get, obj_doc_insert,
-    obj_doc_insert_indexed, obj_doc_update, obj_doc_update_indexed, obj_doc_upsert,
+    obj_close, obj_db_t, obj_doc_delete_raw, obj_doc_delete_indexed, obj_doc_get, obj_doc_insert_raw,
+    obj_doc_insert_indexed, obj_doc_update_raw, obj_doc_update_indexed, obj_doc_upsert_raw,
     obj_index_entry_t, obj_open, obj_read_txn_t, obj_txn_begin_read, obj_txn_begin_write,
     obj_txn_commit, obj_txn_end_read, obj_txn_rollback, obj_write_txn_t, OBJ_ERR_INVALID_ARG,
     OBJ_ERR_UTF8, OBJ_OK,
@@ -79,7 +79,7 @@ fn insert_one(db: *mut obj_db_t, coll: &str, payload: &[u8]) -> u64 {
     let mut id: u64 = 0;
     // SAFETY: txn is valid; cs is NUL-terminated; payload/len are consistent; id is writable.
     let code = unsafe {
-        obj_doc_insert(
+        obj_doc_insert_raw(
             txn,
             cs.as_ptr(),
             payload.as_ptr(),
@@ -87,7 +87,7 @@ fn insert_one(db: *mut obj_db_t, coll: &str, payload: &[u8]) -> u64 {
             &raw mut id,
         )
     };
-    assert_eq!(code, OBJ_OK, "insert_one: obj_doc_insert returned {code}");
+    assert_eq!(code, OBJ_OK, "insert_one: obj_doc_insert_raw returned {code}");
     // SAFETY: txn is valid and was not yet committed.
     let code = unsafe { obj_txn_commit(txn) };
     assert_eq!(code, OBJ_OK, "insert_one: obj_txn_commit returned {code}");
@@ -146,7 +146,7 @@ fn begin_read_null_out_txn_returns_invalid_arg() {
 
 // ── obj_txn_end_read (already tested for null-tolerance in txn_isolation) ────
 
-// ── obj_doc_insert ────────────────────────────────────────────────────────────
+// ── obj_doc_insert_raw ────────────────────────────────────────────────────────
 
 #[test]
 fn insert_null_txn_returns_invalid_arg() {
@@ -154,7 +154,7 @@ fn insert_null_txn_returns_invalid_arg() {
     let mut id: u64 = 0;
     // SAFETY: txn deliberately null; collection, payload, out_id all valid.
     let code =
-        unsafe { obj_doc_insert(ptr::null_mut(), cs.as_ptr(), b"x".as_ptr(), 1, &raw mut id) };
+        unsafe { obj_doc_insert_raw(ptr::null_mut(), cs.as_ptr(), b"x".as_ptr(), 1, &raw mut id) };
     assert_eq!(code, OBJ_ERR_INVALID_ARG);
 }
 
@@ -164,7 +164,7 @@ fn insert_null_collection_returns_invalid_arg() {
     let txn = begin_write(db);
     let mut id: u64 = 0;
     // SAFETY: collection deliberately null; other args valid.
-    let code = unsafe { obj_doc_insert(txn, ptr::null(), b"x".as_ptr(), 1, &raw mut id) };
+    let code = unsafe { obj_doc_insert_raw(txn, ptr::null(), b"x".as_ptr(), 1, &raw mut id) };
     assert_eq!(code, OBJ_ERR_INVALID_ARG);
     // SAFETY: txn is valid but unused; roll back cleanly.
     unsafe { obj_txn_rollback(txn) };
@@ -178,7 +178,7 @@ fn insert_null_out_id_returns_invalid_arg() {
     let txn = begin_write(db);
     let cs = CString::new("c").expect("non-NUL");
     // SAFETY: out_id deliberately null; other args valid.
-    let code = unsafe { obj_doc_insert(txn, cs.as_ptr(), b"x".as_ptr(), 1, ptr::null_mut()) };
+    let code = unsafe { obj_doc_insert_raw(txn, cs.as_ptr(), b"x".as_ptr(), 1, ptr::null_mut()) };
     assert_eq!(code, OBJ_ERR_INVALID_ARG);
     // SAFETY: txn is valid but unused.
     unsafe { obj_txn_rollback(txn) };
@@ -193,7 +193,7 @@ fn insert_null_payload_nonzero_len_returns_invalid_arg() {
     let cs = CString::new("c").expect("non-NUL");
     let mut id: u64 = 0;
     // SAFETY: payload=null but payload_len=1 — the invalid combination the fn guards against.
-    let code = unsafe { obj_doc_insert(txn, cs.as_ptr(), ptr::null(), 1, &raw mut id) };
+    let code = unsafe { obj_doc_insert_raw(txn, cs.as_ptr(), ptr::null(), 1, &raw mut id) };
     assert_eq!(code, OBJ_ERR_INVALID_ARG);
     // SAFETY: txn still valid.
     unsafe { obj_txn_rollback(txn) };
@@ -210,7 +210,7 @@ fn insert_invalid_utf8_collection_returns_utf8_error() {
     let mut id: u64 = 0;
     // SAFETY: bad is a non-null NUL-terminated byte string (not valid UTF-8); other args valid.
     let code = unsafe {
-        obj_doc_insert(
+        obj_doc_insert_raw(
             txn,
             bad.as_ptr().cast(),
             b"x".as_ptr(),
@@ -318,13 +318,13 @@ fn get_invalid_utf8_collection_returns_utf8_error() {
     unsafe { obj_close(db) };
 }
 
-// ── obj_doc_update ────────────────────────────────────────────────────────────
+// ── obj_doc_update_raw ────────────────────────────────────────────────────────
 
 #[test]
 fn update_null_txn_returns_invalid_arg() {
     let cs = CString::new("c").expect("non-NUL");
     // SAFETY: txn deliberately null.
-    let code = unsafe { obj_doc_update(ptr::null_mut(), cs.as_ptr(), 1, b"x".as_ptr(), 1) };
+    let code = unsafe { obj_doc_update_raw(ptr::null_mut(), cs.as_ptr(), 1, b"x".as_ptr(), 1) };
     assert_eq!(code, OBJ_ERR_INVALID_ARG);
 }
 
@@ -333,7 +333,7 @@ fn update_null_collection_returns_invalid_arg() {
     let (_dir, db) = open_db("upd-null-col.obj");
     let txn = begin_write(db);
     // SAFETY: collection deliberately null.
-    let code = unsafe { obj_doc_update(txn, ptr::null(), 1, b"x".as_ptr(), 1) };
+    let code = unsafe { obj_doc_update_raw(txn, ptr::null(), 1, b"x".as_ptr(), 1) };
     assert_eq!(code, OBJ_ERR_INVALID_ARG);
     // SAFETY: txn still valid.
     unsafe { obj_txn_rollback(txn) };
@@ -347,7 +347,7 @@ fn update_id_zero_returns_invalid_arg() {
     let txn = begin_write(db);
     let cs = CString::new("c").expect("non-NUL");
     // SAFETY: id=0 is the sentinel the fn rejects; other args valid.
-    let code = unsafe { obj_doc_update(txn, cs.as_ptr(), 0, b"x".as_ptr(), 1) };
+    let code = unsafe { obj_doc_update_raw(txn, cs.as_ptr(), 0, b"x".as_ptr(), 1) };
     assert_eq!(code, OBJ_ERR_INVALID_ARG);
     // SAFETY: txn still valid.
     unsafe { obj_txn_rollback(txn) };
@@ -361,7 +361,7 @@ fn update_null_payload_nonzero_len_returns_invalid_arg() {
     let txn = begin_write(db);
     let cs = CString::new("c").expect("non-NUL");
     // SAFETY: payload=null but len=1 — the specific invalid combo the fn guards against.
-    let code = unsafe { obj_doc_update(txn, cs.as_ptr(), 1, ptr::null(), 1) };
+    let code = unsafe { obj_doc_update_raw(txn, cs.as_ptr(), 1, ptr::null(), 1) };
     assert_eq!(code, OBJ_ERR_INVALID_ARG);
     // SAFETY: txn still valid.
     unsafe { obj_txn_rollback(txn) };
@@ -376,7 +376,7 @@ fn update_invalid_utf8_collection_returns_utf8_error() {
     let bad: &[u8] = b"\xff\xfe\0";
     // SAFETY: bad is non-null NUL-terminated (not valid UTF-8); id=1 valid; payload valid.
     let code =
-        unsafe { obj_doc_update(txn, bad.as_ptr().cast(), 1, b"x".as_ptr(), 1) };
+        unsafe { obj_doc_update_raw(txn, bad.as_ptr().cast(), 1, b"x".as_ptr(), 1) };
     assert_eq!(code, OBJ_ERR_UTF8);
     // SAFETY: txn still valid.
     unsafe { obj_txn_rollback(txn) };
@@ -384,13 +384,13 @@ fn update_invalid_utf8_collection_returns_utf8_error() {
     unsafe { obj_close(db) };
 }
 
-// ── obj_doc_delete ────────────────────────────────────────────────────────────
+// ── obj_doc_delete_raw ────────────────────────────────────────────────────────
 
 #[test]
 fn delete_null_txn_returns_invalid_arg() {
     let cs = CString::new("c").expect("non-NUL");
     // SAFETY: txn deliberately null.
-    let code = unsafe { obj_doc_delete(ptr::null_mut(), cs.as_ptr(), 1) };
+    let code = unsafe { obj_doc_delete_raw(ptr::null_mut(), cs.as_ptr(), 1) };
     assert_eq!(code, OBJ_ERR_INVALID_ARG);
 }
 
@@ -399,7 +399,7 @@ fn delete_null_collection_returns_invalid_arg() {
     let (_dir, db) = open_db("del-null-col.obj");
     let txn = begin_write(db);
     // SAFETY: collection deliberately null; other args valid.
-    let code = unsafe { obj_doc_delete(txn, ptr::null(), 1) };
+    let code = unsafe { obj_doc_delete_raw(txn, ptr::null(), 1) };
     assert_eq!(code, OBJ_ERR_INVALID_ARG);
     // SAFETY: txn still valid.
     unsafe { obj_txn_rollback(txn) };
@@ -413,7 +413,7 @@ fn delete_id_zero_returns_invalid_arg() {
     let txn = begin_write(db);
     let cs = CString::new("c").expect("non-NUL");
     // SAFETY: id=0 is the sentinel the fn rejects; other args valid.
-    let code = unsafe { obj_doc_delete(txn, cs.as_ptr(), 0) };
+    let code = unsafe { obj_doc_delete_raw(txn, cs.as_ptr(), 0) };
     assert_eq!(code, OBJ_ERR_INVALID_ARG);
     // SAFETY: txn still valid.
     unsafe { obj_txn_rollback(txn) };
@@ -427,7 +427,7 @@ fn delete_invalid_utf8_collection_returns_utf8_error() {
     let txn = begin_write(db);
     let bad: &[u8] = b"\xff\xfe\0";
     // SAFETY: bad is non-null NUL-terminated (not valid UTF-8); id=1 valid.
-    let code = unsafe { obj_doc_delete(txn, bad.as_ptr().cast(), 1) };
+    let code = unsafe { obj_doc_delete_raw(txn, bad.as_ptr().cast(), 1) };
     assert_eq!(code, OBJ_ERR_UTF8);
     // SAFETY: txn still valid.
     unsafe { obj_txn_rollback(txn) };
@@ -435,13 +435,13 @@ fn delete_invalid_utf8_collection_returns_utf8_error() {
     unsafe { obj_close(db) };
 }
 
-// ── obj_doc_upsert ────────────────────────────────────────────────────────────
+// ── obj_doc_upsert_raw ────────────────────────────────────────────────────────
 
 #[test]
 fn upsert_null_txn_returns_invalid_arg() {
     let cs = CString::new("c").expect("non-NUL");
     // SAFETY: txn deliberately null.
-    let code = unsafe { obj_doc_upsert(ptr::null_mut(), cs.as_ptr(), 1, b"x".as_ptr(), 1) };
+    let code = unsafe { obj_doc_upsert_raw(ptr::null_mut(), cs.as_ptr(), 1, b"x".as_ptr(), 1) };
     assert_eq!(code, OBJ_ERR_INVALID_ARG);
 }
 
@@ -450,7 +450,7 @@ fn upsert_null_collection_returns_invalid_arg() {
     let (_dir, db) = open_db("ups-null-col.obj");
     let txn = begin_write(db);
     // SAFETY: collection deliberately null.
-    let code = unsafe { obj_doc_upsert(txn, ptr::null(), 1, b"x".as_ptr(), 1) };
+    let code = unsafe { obj_doc_upsert_raw(txn, ptr::null(), 1, b"x".as_ptr(), 1) };
     assert_eq!(code, OBJ_ERR_INVALID_ARG);
     // SAFETY: txn still valid.
     unsafe { obj_txn_rollback(txn) };
@@ -464,7 +464,7 @@ fn upsert_id_zero_returns_invalid_arg() {
     let txn = begin_write(db);
     let cs = CString::new("c").expect("non-NUL");
     // SAFETY: id=0 is the sentinel the fn rejects; other args valid.
-    let code = unsafe { obj_doc_upsert(txn, cs.as_ptr(), 0, b"x".as_ptr(), 1) };
+    let code = unsafe { obj_doc_upsert_raw(txn, cs.as_ptr(), 0, b"x".as_ptr(), 1) };
     assert_eq!(code, OBJ_ERR_INVALID_ARG);
     // SAFETY: txn still valid.
     unsafe { obj_txn_rollback(txn) };
@@ -478,7 +478,7 @@ fn upsert_null_payload_nonzero_len_returns_invalid_arg() {
     let txn = begin_write(db);
     let cs = CString::new("c").expect("non-NUL");
     // SAFETY: payload=null but len=1 — the invalid combo the fn guards against.
-    let code = unsafe { obj_doc_upsert(txn, cs.as_ptr(), 1, ptr::null(), 1) };
+    let code = unsafe { obj_doc_upsert_raw(txn, cs.as_ptr(), 1, ptr::null(), 1) };
     assert_eq!(code, OBJ_ERR_INVALID_ARG);
     // SAFETY: txn still valid.
     unsafe { obj_txn_rollback(txn) };
@@ -493,7 +493,7 @@ fn upsert_invalid_utf8_collection_returns_utf8_error() {
     let bad: &[u8] = b"\xff\xfe\0";
     // SAFETY: bad is non-null NUL-terminated (not valid UTF-8); id=1 valid; payload valid.
     let code =
-        unsafe { obj_doc_upsert(txn, bad.as_ptr().cast(), 1, b"x".as_ptr(), 1) };
+        unsafe { obj_doc_upsert_raw(txn, bad.as_ptr().cast(), 1, b"x".as_ptr(), 1) };
     assert_eq!(code, OBJ_ERR_UTF8);
     // SAFETY: txn still valid.
     unsafe { obj_txn_rollback(txn) };
