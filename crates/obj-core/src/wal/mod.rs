@@ -751,8 +751,26 @@ fn walk_frames<F: FileBackend>(
     let frame_limit = bounded_frame_limit(size_limit, frame_size);
     let scan_end = scan_aligned_end(file_len, frame_size);
     let scan = find_last_commit_end(file, salt, scan_end, frame_limit, key, frame_size)?;
-    if key.is_some() && scan.salt_match_with_decrypt_failure {
-        return Err(Error::EncryptionKeyInvalid);
+    if let Some(fail_off) = scan.first_decrypt_failure_offset {
+        // A salt-matching frame that failed to decrypt is only
+        // wrong-key / corruption evidence when it sits inside the
+        // authoritative committed prefix. Once a real commit marker is
+        // found (`last_commit_end > WAL_HEADER_SIZE`), that marker
+        // proves the key decrypts and CRC-validates committed frames —
+        // so a decrypt failure AT or PAST it is an ordinary torn tail
+        // (plaintext header persisted, ciphertext body partial or
+        // bit-flipped) and is discarded exactly as the plaintext path
+        // discards a bad-CRC tail. We escalate to
+        // `EncryptionKeyInvalid` only when the failure precedes the
+        // last commit marker, or when no commit marker was found at all
+        // (the whole generation is undecryptable — the wrong-key
+        // smoking gun). `first_decrypt_failure_offset` is the earliest
+        // such offset, so checking it covers every later failure too.
+        let torn_tail_past_commit =
+            scan.last_commit_end > WAL_HEADER_SIZE as u64 && fail_off >= scan.last_commit_end;
+        if !torn_tail_past_commit {
+            return Err(Error::EncryptionKeyInvalid);
+        }
     }
     if scan.last_commit_end <= WAL_HEADER_SIZE as u64 {
         return Ok(empty_recovered(salt));
@@ -768,13 +786,19 @@ fn walk_frames<F: FileBackend>(
 }
 
 /// Result of pass 1 of the WAL walk. Carries
-/// both the last-commit-end byte offset
-/// and a flag that fires if any salt-matching frame failed to
-/// decrypt — the smoking gun for a wrong-key open.
+/// both the last-commit-end byte offset and the earliest byte offset
+/// at which a salt-matching frame failed to decrypt (if any).
+///
+/// The offset — rather than a bare flag — lets the caller distinguish
+/// a decrypt failure inside the committed prefix (wrong key /
+/// corruption) from one past the last commit marker (an ordinary torn
+/// tail, discarded like the plaintext path). Because pass 1 walks
+/// frames in ascending offset order, the first failure recorded is the
+/// smallest offset, so it represents every later failure too.
 #[derive(Debug, Clone, Copy)]
 struct ScanResult {
     last_commit_end: u64,
-    salt_match_with_decrypt_failure: bool,
+    first_decrypt_failure_offset: Option<u64>,
 }
 
 /// Byte offset just past the last full-frame boundary that fits in
@@ -814,7 +838,7 @@ fn find_last_commit_end<F: FileBackend>(
 ) -> Result<ScanResult> {
     let mut offset = WAL_HEADER_SIZE as u64;
     let mut last_commit_end = WAL_HEADER_SIZE as u64;
-    let mut salt_match_with_decrypt_failure = false;
+    let mut first_decrypt_failure_offset: Option<u64> = None;
     let mut walked: u64 = 0;
     while let Some(frame_end) = offset.checked_add(frame_size as u64) {
         if frame_end > scan_end {
@@ -833,8 +857,8 @@ fn find_last_commit_end<F: FileBackend>(
                     .checked_add(frame_size as u64)
                     .ok_or(Error::InvalidArgument("wal offset overflow"))?;
             }
-        } else if frame.salt_matched_but_decrypt_failed {
-            salt_match_with_decrypt_failure = true;
+        } else if frame.salt_matched_but_decrypt_failed && first_decrypt_failure_offset.is_none() {
+            first_decrypt_failure_offset = Some(offset);
         }
         offset = offset
             .checked_add(frame_size as u64)
@@ -842,7 +866,7 @@ fn find_last_commit_end<F: FileBackend>(
     }
     Ok(ScanResult {
         last_commit_end,
-        salt_match_with_decrypt_failure,
+        first_decrypt_failure_offset,
     })
 }
 
