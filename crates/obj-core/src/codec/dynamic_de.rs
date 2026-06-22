@@ -557,20 +557,39 @@ impl DynamicDeserializer<'_> {
     /// is wrapped as a single-element seq.
     fn deserialize_tuple_payload<'de, V: Visitor<'de>>(self, visitor: V) -> DeResult<V::Value> {
         match self.value {
-            Dynamic::Map(map) => visitor.visit_seq(MapValuesSeqDe {
-                iter: map.values(),
-                depth: self.depth,
-            }),
+            Dynamic::Map(map) => {
+                // The walker stores tuple-variant fields under synthetic
+                // decimal keys "0", "1", … "10", "11". A `BTreeMap`
+                // orders those keys LEXICOGRAPHICALLY ("10" < "2"), so
+                // iterating `values()` reorders fields once the arity
+                // reaches 10. Sort the entries by the NUMERIC value of
+                // each key to recover positional order. Keys that aren't
+                // decimal integers sort after the numeric ones (stably,
+                // in original key order) so a malformed payload still
+                // decodes deterministically rather than panicking.
+                let mut entries: Vec<(Option<u64>, &Dynamic)> =
+                    map.iter().map(|(k, v)| (k.parse::<u64>().ok(), v)).collect();
+                entries.sort_by_key(|&(key, _)| (key.is_none(), key));
+                let values: Vec<&Dynamic> = entries.into_iter().map(|(_, v)| v).collect();
+                visitor.visit_seq(MapValuesSeqDe {
+                    iter: values.into_iter(),
+                    depth: self.depth,
+                })
+            }
             Dynamic::Seq(_) => self.deserialize_seq(visitor),
             _ => Err(self.type_err("tuple-variant payload (Map or Seq)")),
         }
     }
 }
 
-/// `SeqAccess` over a [`Dynamic::Map`]'s VALUES (sorted by key) — used
-/// for tuple-variant payloads whose synthetic keys are "0", "1", ….
+/// `SeqAccess` over a [`Dynamic::Map`]'s VALUES in NUMERIC key order —
+/// used for tuple-variant payloads whose synthetic keys are "0", "1", …,
+/// "10". The values are pre-sorted by parsed key in
+/// [`DynamicDeserializer::deserialize_tuple_payload`] so positional
+/// fields survive arities of 10 or more (lexicographic order would put
+/// "10" before "2").
 struct MapValuesSeqDe<'a> {
-    iter: btree_map::Values<'a, String, Dynamic>,
+    iter: std::vec::IntoIter<&'a Dynamic>,
     depth: usize,
 }
 
@@ -1164,6 +1183,55 @@ mod tests {
         };
         let got: Shape = from_dynamic(&node).expect("tuple variant via Seq");
         assert_eq!(got, Shape::Pair(10, 20));
+    }
+
+    // --- tuple variant of arity >= 10: synthetic keys "0".."10" must
+    //     decode in NUMERIC order, not BTreeMap lexicographic order
+    //     ("10" sorts before "2"). Regression for issue #5. ---
+
+    #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+    enum Wide {
+        #[allow(clippy::many_single_char_names)] // allow: an 11-field tuple variant is the point of this regression test.
+        Eleven(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64),
+    }
+
+    #[test]
+    fn tuple_variant_arity_eleven_map_payload_round_trips() {
+        // Build the Map payload the schema walker produces: synthetic
+        // decimal keys "0".."10" with distinct, position-revealing values.
+        let mut payload = BTreeMap::new();
+        for i in 0..11i64 {
+            // value = 100 + position, so a reorder is detectable per slot.
+            payload.insert(i.to_string(), Dynamic::I64(100 + i));
+        }
+        let node = enum_node("Eleven", Dynamic::Map(payload));
+        let got: Wide = from_dynamic(&node).expect("decode 11-field tuple variant");
+        assert_eq!(
+            got,
+            Wide::Eleven(100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110),
+            "fields must come back in positional (numeric-key) order, not lexicographic"
+        );
+    }
+
+    #[test]
+    fn tuple_variant_arity_eleven_encode_round_trips() {
+        use crate::codec::schema::{DynamicSchema, EnumVariantSchema};
+
+        // Full encode + Dynamic::deserialize round-trip through the real
+        // postcard encoder and the schema walker, which produces exactly
+        // the synthetic-key Map ("0".."10") that this fix re-sorts.
+        let original = Wide::Eleven(10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20);
+        let bytes = postcard::to_allocvec(&original).expect("encode");
+
+        // Schema for the single tuple variant: a Map of decimal keys.
+        let fields: Vec<(String, DynamicSchema)> =
+            (0..11).map(|i: u64| (i.to_string(), DynamicSchema::I64)).collect();
+        let schema =
+            DynamicSchema::enumeration([EnumVariantSchema::new(0, "Eleven", DynamicSchema::map(fields))]);
+
+        let dyn_view = Dynamic::from_postcard_bytes(&bytes, &schema).expect("walk");
+        let got: Wide = from_dynamic(&dyn_view).expect("from_dynamic");
+        assert_eq!(got, original, "encode + deserialize must preserve field order");
     }
 
     #[test]
