@@ -76,6 +76,19 @@ fn seed(db: &Db, lo: u64, hi: u64) {
     }
 }
 
+/// Count `placed_at ∈ [0, 1000)` index hits in a fresh read txn opened
+/// AFTER the caller's writer commits, so it observes post-snapshot rows.
+fn count_full_range(db: &Db) -> usize {
+    db.read_transaction(|tx| {
+        let coll = tx.collection::<Order>()?;
+        let hits: Vec<(Vec<u8>, Order)> = coll
+            .index_range("placed_at", 0u64..1000)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(hits.len())
+    })
+    .expect("fresh read")
+}
+
 /// Assert a read txn's snapshot is frozen at 10 pre-snapshot rows
 /// (`placed_at ∈ [0, 10)`) even though the writer has since committed
 /// rows in `[10, 30)`. Exercises all three snapshot-pinned read paths.
@@ -174,5 +187,104 @@ fn read_txn_range_and_count_ignore_post_snapshot_writes() {
     assert_eq!(
         windowed, 20,
         "fresh reader must see the 20 rows in [10, 30)"
+    );
+}
+
+/// Streaming `iter_range` must honour snapshot isolation across its
+/// per-batch refills exactly like the eager `index_range`.
+///
+/// Regression for #9: `IterIndexRange::refill` walked the index B-tree
+/// via the LIVE pager path (`BTree::open` + `tree.range`) regardless of
+/// handle mode, so a Read-mode iterator descended the snapshot-pinned
+/// index root through the live pager — observing a concurrent writer's
+/// post-snapshot COW commits. With >256 in-range entries a second
+/// `refill()` runs; if a writer commits an in-range insert between
+/// `next()` calls, the live refill surfaces the new index entry while
+/// the per-row `get`-back reads the snapshot primary tree (no such doc),
+/// producing a spurious `Error::Corruption`. After the fix the Read-mode
+/// refill walks `range_via_snapshot`, so the new entry stays invisible
+/// and `iter_range` agrees with `index_range` on the same snapshot.
+///
+/// `seed(0, 300)` gives 300 matching entries (> the 256 batch size) so
+/// the iterator MUST refill at least once after the writer commits.
+#[test]
+fn iter_range_streaming_refill_honors_snapshot() {
+    let (db, _dir) = fresh_db();
+    seed(&db, 0, 300);
+
+    let (snap_tx, snap_rx) = mpsc::channel::<()>();
+    let (commit_tx, commit_rx) = mpsc::channel::<()>();
+
+    thread::scope(|s| {
+        let db_r = &db;
+        let db_w = &db;
+
+        s.spawn(move || {
+            db_r.read_transaction(|tx| {
+                let coll = tx.collection::<Order>()?;
+                snap_tx.send(()).expect("snap_tx");
+
+                // First `next()` performs refill #1 (buffers 256 entries).
+                let mut iter = coll.iter_range("placed_at", 0u64..1000)?;
+                let first = iter.next().expect("iterator must yield a first row")?;
+
+                // Let the writer commit an in-range insert, then drain
+                // the rest — the drain triggers refill #2 AFTER the
+                // commit, the window the bug manifested in.
+                commit_rx.recv().expect("commit_rx");
+
+                let mut streamed: Vec<(Vec<u8>, Order)> = vec![first];
+                for step in iter {
+                    // Pre-fix this `?` propagated Error::Corruption when
+                    // refill #2 saw the writer's post-snapshot entry.
+                    streamed.push(step?);
+                }
+
+                // The eager range over the IDENTICAL bounds on the SAME
+                // snapshot handle must match the streamed result exactly.
+                let eager: Vec<(Vec<u8>, Order)> = coll
+                    .index_range("placed_at", 0u64..1000)?
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                assert_eq!(
+                    streamed.len(),
+                    300,
+                    "iter_range leaked/lost rows across refills under a \
+                     concurrent writer (#9 — refill walked the live pager)",
+                );
+                assert!(
+                    streamed.iter().all(|(_k, o)| o.placed_at < 300),
+                    "iter_range surfaced a post-snapshot placed_at (#9)",
+                );
+                assert_eq!(
+                    streamed, eager,
+                    "streaming iter_range and eager index_range diverged \
+                     on the same snapshot (#9)",
+                );
+                Ok(())
+            })
+            .expect("read_transaction must not surface Error::Corruption");
+        });
+
+        s.spawn(move || {
+            snap_rx.recv().expect("snap_rx");
+            // In-range insert (placed_at=290 sorts after the first 256
+            // entries, so it lands in the reader's refill #2 window) with
+            // a fresh id absent from the reader's pinned primary tree.
+            let _ = db_w
+                .insert(Order {
+                    customer_id: 9999,
+                    placed_at: 290,
+                })
+                .expect("writer insert");
+            commit_tx.send(()).expect("commit_tx");
+        });
+    });
+
+    // A fresh reader opened AFTER the writer commits sees all 301 rows.
+    assert_eq!(
+        count_full_range(&db),
+        301,
+        "fresh reader must see the post-snapshot insert"
     );
 }

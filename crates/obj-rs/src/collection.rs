@@ -1998,25 +1998,67 @@ impl<T: Document> IterIndexRange<'_, T> {
     /// so the caller observes them via `next()` rather than aborting
     /// iteration.
     fn refill(&mut self) -> Result<()> {
-        let env = match &self.coll.mode {
-            CollectionMode::Write(w) => w.env,
-            CollectionMode::Read(r) => r.env,
+        let root_pid = PageId::new(self.index_root)
+            .ok_or(Error::InvalidArgument("index root_page_id is zero"))?;
+        let start = self.next_start_bound();
+        let end = clone_bound_ref(&self.end_bound);
+        // Read mode walks the snapshot-pinned index root via
+        // `range_via_snapshot` so a concurrent writer's post-snapshot
+        // COW commits stay invisible — mirroring `collect_range`'s Read
+        // arm. Write mode walks the live pager so the txn observes its
+        // own uncommitted index mutations. Both refs are `Copy` and
+        // outlive the borrow of `self.coll.mode`, so extracting them
+        // here releases that borrow before the `&mut self` drain call.
+        let (snapshot, env) = match &self.coll.mode {
+            CollectionMode::Read(r) => (Some(r.snapshot), r.env),
+            CollectionMode::Write(w) => (None, w.env),
             CollectionMode::Lazy(_) => {
                 return Err(Error::ReadOnly {
                     operation: "internal: iter_range refill in Lazy mode",
                 });
             }
         };
-        let root_pid = PageId::new(self.index_root)
-            .ok_or(Error::InvalidArgument("index root_page_id is zero"))?;
-        let start = self.next_start_bound();
-        let end = clone_bound_ref(&self.end_bound);
-        let mut pager = lock_pager(env)?;
-        let tree = BTree::<FileHandle>::open(&pager, root_pid)?;
-        let iter = tree.range(&mut pager, (start, end))?;
         let mut staged: VecDeque<Result<StagedEntry<T>>> =
             VecDeque::with_capacity(ITER_INDEX_RANGE_BATCH);
         let mut last_full: Option<Vec<u8>> = None;
+        let mut pager = lock_pager(env)?;
+        let consumed = if let Some(snap) = snapshot {
+            let iter = BTree::<FileHandle>::range_via_snapshot(
+                &pager, snap, root_pid, (start, end),
+            )?;
+            self.drain_into_staged(iter, &mut staged, &mut last_full)?
+        } else {
+            let tree = BTree::<FileHandle>::open(&pager, root_pid)?;
+            let iter = tree.range(&mut pager, (start, end))?;
+            self.drain_into_staged(iter, &mut staged, &mut last_full)?
+        };
+        if consumed < ITER_INDEX_RANGE_BATCH {
+            self.finished = true;
+        }
+        drop(pager);
+        self.buffer.extend(staged);
+        if let Some(k) = last_full {
+            self.last_full_key = Some(k);
+        }
+        Ok(())
+    }
+
+    /// Drain up to [`ITER_INDEX_RANGE_BATCH`] entries from a B-tree
+    /// range iterator into `staged`, staging each via [`Self::stage_one`]
+    /// and returning the number of entries consumed. Generic over the
+    /// concrete iterator type so the same bounded loop serves both the
+    /// live (`BTree::range`) Write path and the snapshot
+    /// (`BTree::range_via_snapshot`) Read path. The loop is bounded by
+    /// `ITER_INDEX_RANGE_BATCH` (R2).
+    fn drain_into_staged<I>(
+        &mut self,
+        iter: I,
+        staged: &mut VecDeque<Result<StagedEntry<T>>>,
+        last_full: &mut Option<Vec<u8>>,
+    ) -> Result<usize>
+    where
+        I: Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>,
+    {
         let mut consumed: usize = 0;
         for step in iter {
             if consumed >= ITER_INDEX_RANGE_BATCH {
@@ -2027,17 +2069,9 @@ impl<T: Document> IterIndexRange<'_, T> {
                 .ok_or(Error::BTreeInvariantViolated {
                     reason: "iter_range batch counter overflow",
                 })?;
-            self.stage_one(&mut staged, &mut last_full, step);
+            self.stage_one(staged, last_full, step);
         }
-        if consumed < ITER_INDEX_RANGE_BATCH {
-            self.finished = true;
-        }
-        drop(pager);
-        self.buffer.extend(staged);
-        if let Some(k) = last_full {
-            self.last_full_key = Some(k);
-        }
-        Ok(())
+        Ok(consumed)
     }
 
     /// Process one B-tree step into the staged batch. Encapsulates
