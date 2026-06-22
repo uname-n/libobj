@@ -913,9 +913,7 @@ impl ser::SerializeSeq for SeqBuilder {
                 "index extraction: sequence exceeds MAX_EACH_ENTRIES".to_owned(),
             ));
         }
-        let item = value.serialize(DynamicSerializer {
-            depth: self.depth + 1,
-        })?;
+        let item = value.serialize(deeper(&DynamicSerializer { depth: self.depth })?)?;
         self.items.push(item);
         Ok(())
     }
@@ -967,10 +965,8 @@ struct MapBuilder {
 }
 
 impl MapBuilder {
-    fn deeper_serializer(&self) -> DynamicSerializer {
-        DynamicSerializer {
-            depth: self.depth + 1,
-        }
+    fn deeper_serializer(&self) -> DynRes<DynamicSerializer> {
+        deeper(&DynamicSerializer { depth: self.depth })
     }
 }
 
@@ -978,7 +974,7 @@ impl ser::SerializeMap for MapBuilder {
     type Ok = Dynamic;
     type Error = DynamicSerError;
     fn serialize_key<T: ?Sized + Serialize>(&mut self, key: &T) -> DynRes<()> {
-        let key_dyn = key.serialize(self.deeper_serializer())?;
+        let key_dyn = key.serialize(self.deeper_serializer()?)?;
         let key_string = match key_dyn {
             Dynamic::String(s) => s,
             Dynamic::U64(n) => n.to_string(),
@@ -998,7 +994,7 @@ impl ser::SerializeMap for MapBuilder {
             .pending_key
             .take()
             .ok_or_else(|| DynamicSerError("map value without preceding key".to_owned()))?;
-        let val = value.serialize(self.deeper_serializer())?;
+        let val = value.serialize(self.deeper_serializer()?)?;
         self.map.insert(key, val);
         Ok(())
     }
@@ -1015,7 +1011,7 @@ impl ser::SerializeStruct for MapBuilder {
         key: &'static str,
         value: &T,
     ) -> DynRes<()> {
-        let val = value.serialize(self.deeper_serializer())?;
+        let val = value.serialize(self.deeper_serializer()?)?;
         self.map.insert(key.to_owned(), val);
         Ok(())
     }
@@ -1949,6 +1945,152 @@ mod tests {
         };
         let spec = IndexSpec::standard("by_x", "x").expect("spec");
         let err = extract_index_keys(DeepDoc::COLLECTION, &spec, &doc).expect_err("overflow");
+        assert!(matches!(err, Error::InvalidArgument(_)));
+    }
+
+    /// A recursively-nested **sequence** value: serializes as a
+    /// one-element seq whose element is a shallower `DeepSeq` (or a
+    /// scalar at depth 0). Exercises the `SeqBuilder::serialize_element`
+    /// recursion path, which must be bounded by `MAX_REFLECT_DEPTH`.
+    struct DeepSeq {
+        depth: usize,
+    }
+
+    impl serde::Serialize for DeepSeq {
+        fn serialize<S: serde::Serializer>(
+            &self,
+            s: S,
+        ) -> std::result::Result<S::Ok, S::Error> {
+            use serde::ser::SerializeSeq;
+            let mut sq = s.serialize_seq(Some(1))?;
+            if self.depth == 0 {
+                sq.serialize_element(&0u64)?;
+            } else {
+                sq.serialize_element(&DeepSeq { depth: self.depth - 1 })?;
+            }
+            sq.end()
+        }
+    }
+
+    /// A recursively-nested **map** value: serializes as a one-entry map
+    /// whose value is a shallower `DeepMap` (or a scalar at depth 0).
+    /// Exercises the `MapBuilder::deeper_serializer` recursion path
+    /// (`SerializeMap`), which must be bounded by `MAX_REFLECT_DEPTH`.
+    struct DeepMap {
+        depth: usize,
+    }
+
+    impl serde::Serialize for DeepMap {
+        fn serialize<S: serde::Serializer>(
+            &self,
+            s: S,
+        ) -> std::result::Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap;
+            let mut mp = s.serialize_map(Some(1))?;
+            mp.serialize_key("x")?;
+            if self.depth == 0 {
+                mp.serialize_value(&0u64)?;
+            } else {
+                mp.serialize_value(&DeepMap { depth: self.depth - 1 })?;
+            }
+            mp.end()
+        }
+    }
+
+    /// Wraps a recursively-nested compound value in the single indexed
+    /// field `"x"` of a top-level struct, so `extract_index_keys` drives
+    /// the reflection walk over `inner`. `Deserialize` is a trivial stub
+    /// (never exercised) to satisfy the `Document` bound.
+    struct DeepFieldDoc<V> {
+        inner: V,
+    }
+
+    impl<'de, V> serde::Deserialize<'de> for DeepFieldDoc<V> {
+        fn deserialize<D: serde::Deserializer<'de>>(
+            _d: D,
+        ) -> std::result::Result<Self, D::Error> {
+            Err(serde::de::Error::custom("DeepFieldDoc is serialize-only"))
+        }
+    }
+
+    impl<V: serde::Serialize> serde::Serialize for DeepFieldDoc<V> {
+        fn serialize<S: serde::Serializer>(
+            &self,
+            s: S,
+        ) -> std::result::Result<S::Ok, S::Error> {
+            use serde::ser::SerializeStruct;
+            let mut st = s.serialize_struct("DeepFieldDoc", 1)?;
+            st.serialize_field("x", &self.inner)?;
+            st.end()
+        }
+    }
+
+    impl Document for DeepFieldDoc<DeepSeq> {
+        const COLLECTION: &'static str = "deepseqdocs";
+        const VERSION: u32 = 1;
+    }
+
+    impl Document for DeepFieldDoc<DeepMap> {
+        const COLLECTION: &'static str = "deepmapdocs";
+        const VERSION: u32 = 1;
+    }
+
+    /// Regression for the seq recursion path: before the fix
+    /// `SeqBuilder::serialize_element` incremented `self.depth + 1`
+    /// without consulting `MAX_REFLECT_DEPTH`, so a deeply nested seq
+    /// aborted the process via stack overflow. It must now return a
+    /// graceful `Error::InvalidArgument` — and a depth far past the
+    /// bound must still error gracefully, not crash.
+    #[test]
+    fn deep_seq_nesting_errors_not_aborts() {
+        let spec = IndexSpec::standard("by_x", "x").expect("spec");
+        for depth in [MAX_REFLECT_DEPTH, 5_000] {
+            let doc = DeepFieldDoc {
+                inner: DeepSeq { depth },
+            };
+            let err = extract_index_keys(
+                <DeepFieldDoc<DeepSeq>>::COLLECTION,
+                &spec,
+                &doc,
+            )
+            .expect_err("deep seq overflow");
+            assert!(matches!(err, Error::InvalidArgument(_)));
+        }
+    }
+
+    /// Regression for the map/struct recursion path: before the fix
+    /// `MapBuilder::deeper_serializer` incremented `self.depth + 1`
+    /// without consulting `MAX_REFLECT_DEPTH`. A deeply nested map must
+    /// now return a graceful `Error::InvalidArgument`, even far past the
+    /// bound.
+    #[test]
+    fn deep_map_nesting_errors_not_aborts() {
+        let spec = IndexSpec::standard("by_x", "x").expect("spec");
+        for depth in [MAX_REFLECT_DEPTH, 5_000] {
+            let doc = DeepFieldDoc {
+                inner: DeepMap { depth },
+            };
+            let err = extract_index_keys(
+                <DeepFieldDoc<DeepMap>>::COLLECTION,
+                &spec,
+                &doc,
+            )
+            .expect_err("deep map overflow");
+            assert!(matches!(err, Error::InvalidArgument(_)));
+        }
+    }
+
+    /// Regression for the struct recursion path at a depth far past the
+    /// bound: complements `dynamic_serializer_depth_overflow_errors`
+    /// (which tests exactly `MAX_REFLECT_DEPTH`) by confirming a
+    /// pathological ~5000-deep struct chain returns a graceful `Err`
+    /// rather than aborting the process.
+    #[test]
+    fn deep_struct_nesting_errors_not_aborts() {
+        let doc = DeepDoc { depth: 5_000 };
+        let spec = IndexSpec::standard("by_x", "x").expect("spec");
+        let err = extract_index_keys(DeepDoc::COLLECTION, &spec, &doc)
+            .expect_err("deep struct overflow");
         assert!(matches!(err, Error::InvalidArgument(_)));
     }
 
