@@ -284,8 +284,8 @@ fn iter_index_range_walks_typed_index() {
             rtxn,
             collection.as_ptr(),
             index.as_ptr(),
-            ObjBound { ptr: lower.as_ptr(), len: lower.len(), inclusive: true },
-            ObjBound { ptr: upper.as_ptr(), len: upper.len(), inclusive: false },
+            ObjBound { ptr: lower.as_ptr(), len: lower.len(), inclusive: 1 },
+            ObjBound { ptr: upper.as_ptr(), len: upper.len(), inclusive: 0 },
             &raw mut iter,
         )
     };
@@ -330,13 +330,98 @@ fn count_index_range_matches_iter_count() {
             rtxn,
             collection.as_ptr(),
             index.as_ptr(),
-            ObjBound { ptr: lower.as_ptr(), len: lower.len(), inclusive: true },
-            ObjBound { ptr: upper.as_ptr(), len: upper.len(), inclusive: true },
+            ObjBound { ptr: lower.as_ptr(), len: lower.len(), inclusive: 1 },
+            ObjBound { ptr: upper.as_ptr(), len: upper.len(), inclusive: 1 },
             &raw mut count,
         )
     };
     assert_eq!(code, OBJ_OK);
     assert_eq!(count, 2, "ages 20 + 30 should match the range");
+    unsafe { obj_txn_end_read(rtxn) };
+    unsafe { obj_close(db) };
+}
+
+/// A C caller may leave any non-0/1 byte in `ObjBound.inclusive`
+/// (`_Bool` is only required to round-trip `0`/`1`). Such a byte must
+/// be treated as "inclusive = true", and must never reach a Rust
+/// `bool` (which would be UB for a non-0/1 bit pattern). With both
+/// bounds carrying a truthy-but-non-1 byte (`0x02` / `0xFF`), the
+/// inclusive `[20, 40]` range over ages 10/20/30/40 yields 3 entries;
+/// were the byte mis-read as exclusive, only age 30 would match.
+/// Seed `customers` with ages 10/20/30/40 so range tests have a
+/// populated `by_age` standard index.
+fn seed_customer_ages(path: &Path) {
+    let db = Db::open(path).expect("open");
+    for (email, age) in [
+        ("a@x.com", 10u32),
+        ("b@x.com", 20u32),
+        ("c@x.com", 30u32),
+        ("d@x.com", 40u32),
+    ] {
+        db.insert(Customer {
+            email: email.to_string(),
+            age,
+        })
+        .expect("insert");
+    }
+}
+
+#[test]
+fn range_inclusive_nonbool_byte_is_treated_as_inclusive() {
+    let dir = TempDir::new().expect("tmp");
+    let path = dir.path().join("nonbool-range.obj");
+    seed_customer_ages(&path);
+    let db = open_db_c(&path);
+    let rtxn = begin_read(db);
+    let collection = CString::new("customers").expect("non-NUL");
+    let index = CString::new("by_age").expect("non-NUL");
+    let lower = encode_standard_u32_key(20);
+    let upper = encode_standard_u32_key(40);
+
+    // Truthy bytes that are NOT 1 — the bit patterns that would be UB
+    // if loaded as a Rust `bool`.
+    let lower_bound = ObjBound {
+        ptr: lower.as_ptr(),
+        len: lower.len(),
+        inclusive: 0x02,
+    };
+    let upper_bound = ObjBound {
+        ptr: upper.as_ptr(),
+        len: upper.len(),
+        inclusive: 0xFF,
+    };
+
+    let mut count: u64 = 0;
+    let code = unsafe {
+        obj_count_index_range(
+            rtxn,
+            collection.as_ptr(),
+            index.as_ptr(),
+            lower_bound,
+            upper_bound,
+            &raw mut count,
+        )
+    };
+    assert_eq!(code, OBJ_OK);
+    assert_eq!(count, 3, "non-0/1 inclusive byte must behave as inclusive");
+
+    // Same expectation through the iterator path.
+    let mut iter: *mut obj_iter_t = ptr::null_mut();
+    let code = unsafe {
+        obj_iter_index_range(
+            rtxn,
+            collection.as_ptr(),
+            index.as_ptr(),
+            lower_bound,
+            upper_bound,
+            &raw mut iter,
+        )
+    };
+    assert_eq!(code, OBJ_OK);
+    let entries = drain(iter);
+    unsafe { obj_iter_free(iter) };
+    assert_eq!(entries.len(), 3, "got {entries:?}");
+
     unsafe { obj_txn_end_read(rtxn) };
     unsafe { obj_close(db) };
 }

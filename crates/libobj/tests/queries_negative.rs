@@ -175,8 +175,8 @@ fn iter_index_range_null_txn_returns_invalid_arg() {
             ptr::null_mut(),
             cs.as_ptr(),
             idx.as_ptr(),
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
             &raw mut iter,
         )
     };
@@ -195,8 +195,8 @@ fn iter_index_range_null_collection_returns_invalid_arg() {
             rtxn,
             ptr::null(),
             idx.as_ptr(),
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
             &raw mut iter,
         )
     };
@@ -219,8 +219,8 @@ fn iter_index_range_null_index_name_returns_invalid_arg() {
             rtxn,
             cs.as_ptr(),
             ptr::null(),
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
             &raw mut iter,
         )
     };
@@ -243,8 +243,8 @@ fn iter_index_range_null_out_iter_returns_invalid_arg() {
             rtxn,
             cs.as_ptr(),
             idx.as_ptr(),
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
             ptr::null_mut(),
         )
     };
@@ -268,8 +268,8 @@ fn iter_index_range_null_lower_nonzero_len_returns_invalid_arg() {
             rtxn,
             cs.as_ptr(),
             idx.as_ptr(),
-            ObjBound { ptr: ptr::null(), len: 1, inclusive: true },
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 1, inclusive: 1 },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
             &raw mut iter,
         )
     };
@@ -296,8 +296,8 @@ fn iter_index_range_null_upper_nonzero_len_returns_invalid_arg() {
             rtxn,
             cs.as_ptr(),
             idx.as_ptr(),
-            ObjBound { ptr: lower_key.as_ptr(), len: lower_key.len(), inclusive: true },
-            ObjBound { ptr: ptr::null(), len: 1, inclusive: false },
+            ObjBound { ptr: lower_key.as_ptr(), len: lower_key.len(), inclusive: 1 },
+            ObjBound { ptr: ptr::null(), len: 1, inclusive: 0 },
             &raw mut iter,
         )
     };
@@ -322,8 +322,8 @@ fn iter_index_range_invalid_utf8_collection_returns_utf8_error() {
             rtxn,
             bad.as_ptr().cast(),
             idx.as_ptr(),
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
             &raw mut iter,
         )
     };
@@ -348,8 +348,8 @@ fn iter_index_range_invalid_utf8_index_name_returns_utf8_error() {
             rtxn,
             cs.as_ptr(),
             bad.as_ptr().cast(),
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
             &raw mut iter,
         )
     };
@@ -859,8 +859,8 @@ fn count_index_range_null_txn_returns_invalid_arg() {
             ptr::null_mut(),
             cs.as_ptr(),
             idx.as_ptr(),
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
             &raw mut count,
         )
     };
@@ -879,8 +879,8 @@ fn count_index_range_null_collection_returns_invalid_arg() {
             rtxn,
             ptr::null(),
             idx.as_ptr(),
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
             &raw mut count,
         )
     };
@@ -903,8 +903,8 @@ fn count_index_range_null_index_name_returns_invalid_arg() {
             rtxn,
             cs.as_ptr(),
             ptr::null(),
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
             &raw mut count,
         )
     };
@@ -927,8 +927,8 @@ fn count_index_range_null_out_count_returns_invalid_arg() {
             rtxn,
             cs.as_ptr(),
             idx.as_ptr(),
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
             ptr::null_mut(),
         )
     };
@@ -952,8 +952,8 @@ fn count_index_range_null_lower_nonzero_len_returns_invalid_arg() {
             rtxn,
             cs.as_ptr(),
             idx.as_ptr(),
-            ObjBound { ptr: ptr::null(), len: 1, inclusive: true },
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 1, inclusive: 1 },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
             &raw mut count,
         )
     };
@@ -979,8 +979,8 @@ fn count_index_range_null_upper_nonzero_len_returns_invalid_arg() {
             rtxn,
             cs.as_ptr(),
             idx.as_ptr(),
-            ObjBound { ptr: lower_key.as_ptr(), len: lower_key.len(), inclusive: true },
-            ObjBound { ptr: ptr::null(), len: 2, inclusive: false },
+            ObjBound { ptr: lower_key.as_ptr(), len: lower_key.len(), inclusive: 1 },
+            ObjBound { ptr: ptr::null(), len: 2, inclusive: 0 },
             &raw mut count,
         )
     };
@@ -1004,8 +1004,8 @@ fn count_index_range_invalid_utf8_collection_returns_utf8_error() {
             rtxn,
             bad.as_ptr().cast(),
             idx.as_ptr(),
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
             &raw mut count,
         )
     };
@@ -1029,8 +1029,8 @@ fn count_index_range_invalid_utf8_index_name_returns_utf8_error() {
             rtxn,
             cs.as_ptr(),
             bad.as_ptr().cast(),
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
-            ObjBound { ptr: ptr::null(), len: 0, inclusive: false },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
+            ObjBound { ptr: ptr::null(), len: 0, inclusive: 0 },
             &raw mut count,
         )
     };
