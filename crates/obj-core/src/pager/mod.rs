@@ -1467,6 +1467,32 @@ impl<F: FileBackend> Pager<F> {
     /// — still durable in the WAL — remain visible to same-process
     /// reads and to a later retry.
     ///
+    /// # Deferral while a reader is pinned (writer-starvation hazard)
+    ///
+    /// If any live MVCC reader (`reader_snapshot`) has pinned an LSN
+    /// below end-of-WAL, this returns `Ok(())` immediately and reclaims
+    /// **nothing** (`checkpoint_deferred_for_pinned_reader`) — folding
+    /// the WAL would discard frames the reader still needs. This is a
+    /// deliberate all-or-nothing deferral: there is no partial reclaim
+    /// up to `min_pinned_lsn`, so while the reader lives the WAL only
+    /// grows. Because `commit`'s auto-checkpoint uses this same path, a
+    /// single long-held [`ReaderSnapshot`] starves writers — the WAL
+    /// climbs to `WalConfig::size_limit` and `append_raw` then fails all
+    /// writes with `"wal size limit exceeded"`. See [`Self::reader_snapshot`]
+    /// for the full interaction and the caller's "keep reads short"
+    /// obligation.
+    ///
+    /// # Single-process scope (cross-process readers are NOT protected)
+    ///
+    /// The pinned-reader check consults **this process's** snapshots map
+    /// only. A reader in another process is invisible here, and its
+    /// shared cross-process `READER_LOCK` byte does not conflict with
+    /// the writer lock this checkpoint runs under. Consequently a
+    /// checkpoint here can fold WAL frames and rotate the salt out from
+    /// under a reader in a *different* process. Snapshot isolation is a
+    /// single-process guarantee; the cross-process contract is
+    /// single-writer exclusion only. See [`Self::reader_snapshot`].
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Io`] on syscall failure.
@@ -1516,6 +1542,14 @@ impl<F: FileBackend> Pager<F> {
     /// Returns `true` when a live MVCC reader has pinned an LSN below
     /// the current end-of-WAL — in which case [`Self::checkpoint`]
     /// must defer rather than reclaim frames the reader still needs.
+    ///
+    /// Deferral is all-or-nothing: a single pinned LSN below end-of-WAL
+    /// blocks the entire checkpoint (no partial reclaim up to
+    /// `min_pinned_lsn`), so the WAL grows until the reader drops — the
+    /// writer-starvation hazard documented on [`Self::reader_snapshot`].
+    /// Only **this process's** snapshots map is consulted; a reader in
+    /// another process cannot be seen and is not protected. See
+    /// [`Self::checkpoint`] for the cross-process scope note.
     fn checkpoint_deferred_for_pinned_reader(&self) -> bool {
         let Some(min_lsn) = self.min_pinned_lsn() else {
             return false;
@@ -1624,6 +1658,50 @@ impl<F: FileBackend> Pager<F> {
     /// live-snapshots map and removes the pin on drop.  Checkpoint
     /// consults `snapshots.values().min()` when deciding whether it
     /// is safe to reclaim WAL frames.
+    ///
+    /// # Writer-starvation interaction (single long-lived reader)
+    ///
+    /// The pin is what keeps a reader's frames durable, but it is also
+    /// a *liveness hazard for writers*. While a snapshot pins an LSN
+    /// below end-of-WAL, [`Self::checkpoint`] defers and reclaims
+    /// **nothing** (see `checkpoint_deferred_for_pinned_reader`). The
+    /// auto-checkpoint that `commit` triggers takes the same deferred
+    /// path, so every subsequent commit keeps *appending* frames while
+    /// none are folded back into the main file. The WAL therefore grows
+    /// monotonically toward `WalConfig::size_limit` (default 64 MiB) for
+    /// as long as the snapshot is held. Once the cap is reached,
+    /// `WalTxn::append_raw` returns
+    /// `Error::InvalidArgument("wal size limit exceeded")` and **every
+    /// writer fails** until the snapshot is dropped and a checkpoint can
+    /// reclaim the WAL.
+    ///
+    /// A single long-held `ReaderSnapshot` can thus wedge all writers.
+    /// Callers MUST treat reader snapshots (and the `ReadTxn` that wraps
+    /// one) as short-lived: take a snapshot, read what you need, and let
+    /// it drop. Do not hold one open across an unbounded amount of write
+    /// traffic. (Partial reclamation up to `min_pinned_lsn` — folding
+    /// only frames the reader no longer needs — is **not** implemented:
+    /// the WAL has no per-LSN partial-truncation primitive
+    /// [`reset_after_checkpoint`] resets the whole file with a fresh
+    /// salt and `state.view` is a collapsed `PageId -> latest-version`
+    /// map that retains no superseded versions, so there is no safe way
+    /// to fold a post-snapshot overwrite without corrupting the pinned
+    /// reader's view.)
+    ///
+    /// # Single-process isolation only
+    ///
+    /// The live-snapshots map is **this process's** `Pager` state. A
+    /// reader in a *different* process has its own `Pager`, its own
+    /// snapshots map, and its own pinned LSN — none of which are visible
+    /// here. The cross-process `READER_LOCK` byte is shared among
+    /// readers but is **not exclusive with writers**, so it does not
+    /// defer another process's checkpoint either. Snapshot isolation
+    /// (a reader observing a stable, consistent view across concurrent
+    /// writes) is therefore guaranteed **only within a single process**.
+    /// Across processes the contract is single-writer exclusion only: a
+    /// writer/checkpoint in process A can fold WAL frames and rotate the
+    /// salt while process B holds a reader, and process B's snapshot is
+    /// not protected from that. See [`Self::checkpoint`].
     ///
     /// No `dyn`. The snapshot is generic over
     /// `F: FileBackend`.

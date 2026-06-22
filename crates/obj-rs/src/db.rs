@@ -460,6 +460,23 @@ impl Db {
     /// begins. Concurrent writers do not affect what the closure
     /// sees.
     ///
+    /// # Single-process isolation; keep reads short
+    ///
+    /// This snapshot-isolation guarantee holds **only within a single
+    /// process**: it is enforced by this process's MVCC reader pins.
+    /// Across processes the database provides single-writer exclusion,
+    /// **not** cross-process read isolation — a writer or
+    /// [`Self::checkpoint`] in another process can fold the WAL and
+    /// rotate the salt while this closure runs, so do not rely on a
+    /// cross-process reader seeing a frozen view.
+    ///
+    /// The reader pin also defers checkpointing: while this closure is
+    /// live, no committed WAL frames are reclaimed, so the WAL grows
+    /// with every concurrent commit. A read transaction held open across
+    /// heavy write traffic can drive the WAL to its size limit and make
+    /// writers fail with `"wal size limit exceeded"`. Keep the closure
+    /// short — read what you need and return.
+    ///
     /// # Examples
     ///
     /// Two reads inside one `read_transaction` see the same value
@@ -1308,6 +1325,26 @@ impl Db {
     ///   reader's frames are not reclaimed out from under it.
     /// - If there is nothing to fold (no committed WAL frames), the
     ///   call is a harmless no-op.
+    ///
+    /// # Writer-starvation caveat (long-lived readers)
+    ///
+    /// Deferral is all-or-nothing: while *any* in-process reader (a live
+    /// read transaction / snapshot) pins an LSN below end-of-WAL, neither
+    /// this call nor the implicit auto-checkpoint after a commit reclaims
+    /// the WAL. The WAL then grows toward its size limit (default
+    /// 64 MiB) with every commit, and once that cap is hit all writes
+    /// fail with `Error::InvalidArgument("wal size limit exceeded")`
+    /// until the reader is dropped. Keep read transactions short-lived;
+    /// do not hold one open across heavy write traffic.
+    ///
+    /// # Single-process scope
+    ///
+    /// MVCC snapshot isolation is guaranteed only **within one process**.
+    /// This deferral is driven by the calling process's own live-reader
+    /// set; a reader in a *different* process is invisible to it. The
+    /// cross-process lock layer provides single-writer exclusion, not
+    /// cross-process read isolation, so a checkpoint here may fold WAL
+    /// frames and rotate the salt while another process is mid-read.
     ///
     /// This is the reusable engine entry point for an explicit
     /// checkpoint and a future checkpoint-on-close path.
