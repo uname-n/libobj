@@ -984,7 +984,7 @@ impl Db {
     }
 
     /// Convenience wrapper around [`crate::Collection::find_unique`]
-    /// — `db.find_unique::<Customer>("by_email", "ada@example.com")`.
+    /// — `db.find_unique::<Customer>("email", "ada@example.com")`.
     /// Runs inside a one-shot read transaction.
     ///
     /// `O(log n)`, no collection scan; the lookup walks the named

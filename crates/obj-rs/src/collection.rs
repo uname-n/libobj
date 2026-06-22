@@ -682,7 +682,7 @@ impl<'tx, T: Document> Collection<'tx, T> {
     /// # Errors
     ///
     /// - [`Error::IndexNotFound`] if `index_name` is unknown / dropped.
-    /// - [`obj_core::Error::Codec`] if a `Dynamic::String` bound
+    /// - [`obj_core::Error::InvalidArgument`] if a `Dynamic::String` bound
     ///   carries an embedded NUL byte (the order-preserving encoder
     ///   rejects those).
     /// - Pager / B-tree / codec errors propagated.
