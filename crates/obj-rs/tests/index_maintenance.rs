@@ -369,6 +369,37 @@ fn composite_index_round_trips_through_insert_and_delete() {
 }
 
 #[test]
+fn lookup_on_composite_index_errors_with_index_range_guidance() {
+    let dir = TempDir::new().expect("tmp");
+    let path = dir.path().join("composite-lookup.obj");
+    let db = Db::open(&path).expect("open");
+    let _ = db
+        .insert(Order {
+            customer_id: 1,
+            placed_at: 100,
+        })
+        .expect("o1");
+    let err = db
+        .read_transaction(|tx| {
+            let coll = tx.collection::<Order>()?;
+            // A single scalar key cannot address a tuple-shaped
+            // Composite key; this must be rejected up front rather
+            // than surfacing the opaque encode_index_key message.
+            coll.lookup("by_customer_time", 1u64).map(|_| ())
+        })
+        .expect_err("composite lookup must error");
+    match err {
+        obj::Error::InvalidArgument(msg) => {
+            assert!(
+                msg.contains("Composite") && msg.contains("index_range"),
+                "message should name Composite and point at index_range, got: {msg}"
+            );
+        }
+        other => panic!("expected InvalidArgument, got {other:?}"),
+    }
+}
+
+#[test]
 fn each_index_with_empty_seq_does_nothing() {
     let dir = TempDir::new().expect("tmp");
     let path = dir.path().join("each-empty.obj");

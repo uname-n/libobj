@@ -616,10 +616,11 @@ impl<'tx, T: Document> Collection<'tx, T> {
     }
 
     /// Yield every document whose `index_name` key matches `key`.
-    /// Works on `Standard` / `Unique` / `Each` indexes. Returns
-    /// `Err(Error::IndexKindMismatch)`-style guidance for
-    /// `Composite` (use [`Self::index_range`] for tuple-shaped
-    /// keys).
+    /// Works on `Standard` / `Unique` / `Each` indexes. A `Composite`
+    /// index has a tuple-shaped key that a single scalar `key` cannot
+    /// address, so it is rejected with a clear
+    /// [`Error::InvalidArgument`] whose message directs the caller to
+    /// [`Self::index_range`] for tuple-shaped keys.
     ///
     /// The same document is yielded at most once even if it owns
     /// multiple matching entries — `Each` indexes can encode the
@@ -628,6 +629,8 @@ impl<'tx, T: Document> Collection<'tx, T> {
     /// # Errors
     ///
     /// - [`Error::IndexNotFound`] if `index_name` is unknown / dropped.
+    /// - [`Error::InvalidArgument`] if `index_name` names a `Composite`
+    ///   index — use [`Self::index_range`] for those.
     /// - Pager / B-tree / codec errors propagated.
     pub fn lookup(
         &self,
@@ -642,12 +645,16 @@ impl<'tx, T: Document> Collection<'tx, T> {
             return r;
         }
         let descriptor = self.active_index(index_name)?;
+        if descriptor.kind == obj_core::IndexKind::Composite {
+            return Err(Error::InvalidArgument(
+                "lookup() does not support Composite indexes; \
+                 use index_range() for tuple-shaped keys",
+            ));
+        }
         let encoded = index_key_for_lookup(descriptor, &[key_dyn])?;
         let ids = match descriptor.kind {
             obj_core::IndexKind::Unique => self.collect_unique(descriptor, encoded.as_bytes())?,
-            obj_core::IndexKind::Standard
-            | obj_core::IndexKind::Each
-            | obj_core::IndexKind::Composite => {
+            obj_core::IndexKind::Standard | obj_core::IndexKind::Each => {
                 self.collect_nonunique_equal(descriptor, encoded.as_bytes())?
             }
             _ => return Err(Error::InvalidArgument("unsupported index kind")),
