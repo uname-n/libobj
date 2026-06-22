@@ -551,16 +551,30 @@ unsafe fn build_config_from_c(
     let sync_mode = unsafe { (*config).sync_mode };
     // SAFETY: config is non-null per the # Safety contract; effective >= MIN_CONFIG_SIZE (checked above) guarantees busy_timeout_ms is within the readable prefix.
     let busy_timeout_ms = unsafe { (*config).busy_timeout_ms };
-    // SAFETY: config is non-null per the # Safety contract; effective >= MIN_CONFIG_SIZE (checked above) guarantees skip_open_check is within the readable prefix.
-    let skip_open_check = unsafe { (*config).skip_open_check };
+    // Read the C `bool` field through a `*const u8` reinterpret and
+    // compare `!= 0` rather than loading it as a Rust `bool` directly:
+    // a Rust `bool` whose byte is not exactly 0 or 1 is UB, whereas C
+    // callers may leave any non-0/1 byte in a `_Bool`-typed field. This
+    // mirrors the `OBJ_INDEX_VALUE_BOOL` path in `dynamic_from_kind`.
+    // SAFETY: config is non-null per the # Safety contract; effective >= MIN_CONFIG_SIZE (checked above) guarantees skip_open_check is within the readable prefix. The field is read as a raw byte (valid for any bit pattern) and normalised to a Rust bool via != 0.
+    let skip_open_check =
+        unsafe { core::ptr::addr_of!((*config).skip_open_check).cast::<u8>().read() } != 0;
     let mut cfg = obj_engine::Config::default().sync_mode(sync_mode_from_c(sync_mode));
     if busy_timeout_ms > 0 {
         cfg = cfg.busy_timeout(Duration::from_millis(busy_timeout_ms));
     }
     cfg = cfg.skip_open_check(skip_open_check);
-    // SAFETY: config is non-null per the # Safety contract; the effective >= KEY_FIELDS_END_OFFSET short-circuit guarantees has_encryption_key is within the readable prefix before it is read.
-    if effective >= KEY_FIELDS_END_OFFSET && unsafe { (*config).has_encryption_key } {
-        // SAFETY: config is non-null per the # Safety contract; effective >= KEY_FIELDS_END_OFFSET (checked in the enclosing if) guarantees the 32-byte encryption_key is within the readable prefix.
+    // SAFETY: config is non-null per the # Safety contract; the effective >= KEY_FIELDS_END_OFFSET short-circuit guarantees has_encryption_key is within the readable prefix before it is read. The flag is read as a raw byte (valid for any bit pattern) and normalised via != 0.
+    let has_key = effective >= KEY_FIELDS_END_OFFSET
+        && unsafe { core::ptr::addr_of!((*config).has_encryption_key).cast::<u8>().read() } != 0;
+    if has_key {
+        // The 32-byte master key is copied onto this stack frame so it
+        // can be handed to `Config::encryption_key`. The local `key`
+        // copy is transient: it is moved into `cfg` on the next line
+        // and not otherwise retained. libobj does not depend on
+        // `zeroize`, so the copy is not scrubbed from the stack frame
+        // here; the engine owns the durable copy and its zeroization.
+        // SAFETY: config is non-null per the # Safety contract; effective >= KEY_FIELDS_END_OFFSET (checked above) guarantees the 32-byte encryption_key is within the readable prefix.
         let key = unsafe { (*config).encryption_key };
         cfg = cfg.encryption_key(key);
     }
@@ -665,6 +679,14 @@ pub const OBJ_INDEX_VALUE_BYTES: obj_index_value_kind_t = 5;
 /// most `value_len + 5` bytes, so `value_len + 5` is always a safe
 /// up-front capacity.)
 ///
+/// On a value/kind validation failure (an unknown `kind`, a fixed-
+/// width `value_len` mismatch, non-UTF-8 `STRING` bytes, or an
+/// embedded NUL the encoding rejects) the call writes `*out_len = 0`
+/// and returns the error code WITHOUT touching `out`. `*out_len` is
+/// therefore always written whenever `out_len` is non-null: the
+/// encoded (or required) length on `OBJ_OK` and the too-small path,
+/// and `0` on a validation failure.
+///
 /// # Safety
 ///
 /// - `value` may be NULL IFF `value_len == 0`; otherwise it must
@@ -699,11 +721,19 @@ pub unsafe extern "C" fn obj_index_key_encode(
         };
         let dynamic = match dynamic_from_kind(kind, value_slice) {
             Ok(d) => d,
-            Err(code) => return code,
+            Err(code) => {
+                // SAFETY: out_len is non-null (checked above) and a writable size_t* per the # Safety contract.
+                unsafe { *out_len = 0 };
+                return code;
+            }
         };
         let encoded = match obj_core::index::encode_field(&dynamic) {
             Ok(e) => e,
-            Err(e) => return error_to_code(&e),
+            Err(e) => {
+                // SAFETY: out_len is non-null (checked above) and a writable size_t* per the # Safety contract.
+                unsafe { *out_len = 0 };
+                return error_to_code(&e);
+            }
         };
         // SAFETY: out_len is non-null (checked above) and out points to out_cap writable bytes (or is null with out_cap == 0, checked above), satisfying write_encoded_out's # Safety contract.
         unsafe { write_encoded_out(encoded.as_bytes(), out, out_cap, out_len) }
