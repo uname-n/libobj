@@ -65,6 +65,16 @@ pub struct Db {
     /// ([`Self::pin_attached_snapshots`]) skip the mutex acquire when
     /// no databases are attached (the overwhelmingly common case).
     pub(crate) attached_len: Arc<std::sync::atomic::AtomicUsize>,
+    /// Set when a transaction rollback could not re-derive the
+    /// in-memory catalog (see [`Self::refresh_catalog`]). While set,
+    /// the in-memory `Catalog` may carry `next_collection_id` /
+    /// `tree.root` state that advanced inside a rolled-back closure but
+    /// no longer matches the on-disk catalog. [`Self::transaction`]
+    /// retries the re-derive before running any further closure and
+    /// refuses to proceed until it succeeds, so a poisoned catalog can
+    /// never silently back a subsequent write. Cleared on the next
+    /// successful re-derive.
+    pub(crate) catalog_poisoned: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl std::fmt::Debug for Db {
@@ -273,6 +283,7 @@ impl Db {
             reconciled: Arc::new(Mutex::new(HashSet::new())),
             attached: Arc::new(Mutex::new(HashMap::new())),
             attached_len: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            catalog_poisoned: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -362,6 +373,13 @@ impl Db {
                 operation: "transaction",
             });
         }
+        // A prior rollback may have failed to re-derive the catalog
+        // (mutex poisoning, mapped to `Error::Busy`), leaving stale
+        // advanced `next_collection_id` / `tree.root` state in memory.
+        // Re-derive before running any closure so a write never sees a
+        // catalog whose in-memory cursor disagrees with disk; surface
+        // the failure rather than proceed against a poisoned catalog.
+        self.recover_poisoned_catalog()?;
         #[cfg(feature = "tracing")]
         tracing::debug!("begin");
         let inner = obj_core::WriteTxn::begin(&self.env, self.busy_timeout)?;
@@ -379,12 +397,41 @@ impl Db {
             }
             Err(e) => {
                 let _ = tx.rollback();
-                let _ = self.refresh_catalog();
+                // The closure's own error `e` stays the primary,
+                // returned error. If re-deriving the catalog fails, the
+                // stale advanced state would otherwise silently survive
+                // in memory; instead mark the catalog poisoned so the
+                // next `transaction` re-derives (or refuses) before any
+                // further write — the failure is not dropped, only
+                // deferred to where it can be surfaced.
+                if self.refresh_catalog().is_err() {
+                    self.catalog_poisoned
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 #[cfg(feature = "tracing")]
                 tracing::debug!("rollback");
                 Err(e)
             }
         }
+    }
+
+    /// Re-derive the in-memory catalog if a prior rollback left it
+    /// poisoned (see [`Self::catalog_poisoned`]). On success clears the
+    /// flag; on failure leaves it set and returns the error so the
+    /// caller refuses to proceed against a catalog whose in-memory
+    /// cursor may disagree with disk. A no-op (the common case) when
+    /// the flag is clear.
+    fn recover_poisoned_catalog(&self) -> Result<()> {
+        if !self
+            .catalog_poisoned
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(());
+        }
+        self.refresh_catalog()?;
+        self.catalog_poisoned
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
     }
 
     /// Re-open the in-memory `Catalog` handle from the pager.  Used
@@ -1623,4 +1670,53 @@ fn first_failure_as_error(report: &obj_core::IntegrityReport) -> Option<Error> {
         _ => Error::Corruption { page_id: 0 },
     };
     Some(err)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use super::Db;
+
+    // A poisoned in-memory catalog (a prior rollback's `refresh_catalog`
+    // could not re-derive it) is re-derived and the flag cleared at the
+    // start of the next `transaction`, before any closure runs — the
+    // failure is not silently dropped, it is surfaced/recovered where it
+    // matters. `recover_poisoned_catalog` succeeds here (the common
+    // recovery case, no real mutex poisoning) and clears the flag.
+    #[test]
+    fn poisoned_catalog_recovers_on_next_transaction() {
+        let db = Db::memory().unwrap();
+
+        // Simulate a prior rollback whose `refresh_catalog` failed.
+        db.catalog_poisoned.store(true, Ordering::SeqCst);
+
+        // The next transaction must clear the flag and run normally.
+        let out = db.transaction(|_tx| Ok(42u64)).unwrap();
+        assert_eq!(out, 42);
+        assert!(
+            !db.catalog_poisoned.load(Ordering::SeqCst),
+            "successful re-derive must clear the poison flag"
+        );
+    }
+
+    // The poison flag starts clear, and neither a successful nor a
+    // rolled-back transaction sets it on the normal (non-poisoned) path.
+    #[test]
+    fn poison_flag_stays_clear_on_normal_paths() {
+        let db = Db::memory().unwrap();
+        assert!(!db.catalog_poisoned.load(Ordering::SeqCst));
+
+        db.transaction(|_tx| Ok(())).unwrap();
+        assert!(!db.catalog_poisoned.load(Ordering::SeqCst));
+
+        // A closure that returns Err triggers the rollback path; with a
+        // healthy catalog `refresh_catalog` succeeds, so the flag stays
+        // clear and the closure's own error is returned.
+        let err = db
+            .transaction(|_tx| Err(obj_core::Error::InvalidArgument("abort")) as obj_core::Result<()>)
+            .unwrap_err();
+        assert!(matches!(err, obj_core::Error::InvalidArgument("abort")));
+        assert!(!db.catalog_poisoned.load(Ordering::SeqCst));
+    }
 }
