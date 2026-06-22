@@ -1,8 +1,10 @@
 //! Cross-process byte-range file locking.
 //!
-//! POSIX uses OFD `fcntl` locks (`F_OFD_SETLK` /
-//! `F_OFD_SETLKW`) — kernel-tracked per-fd, fork-safe, automatically
-//! released on process exit.
+//! POSIX uses OFD `fcntl` locks — kernel-tracked per-fd, fork-safe,
+//! automatically released on process exit. Only the non-blocking
+//! `F_OFD_SETLK` command is ever issued; blocking acquisition is
+//! emulated via bounded backoff in `retry_until_acquired` rather than
+//! via the blocking `F_OFD_SETLKW` command.
 //!
 //! Locks anchor against a dedicated `<db>.obj-lock` sidecar file
 //! created by `Db::open` next to the main database (mirroring the
