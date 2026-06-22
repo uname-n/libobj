@@ -1,19 +1,23 @@
-//! Assert the README's quickstart `rust` block actually compiles
-//! against the live `obj` API.
+//! Assert that **every** `rust` fenced block in the README actually
+//! compiles against the live `obj` API.
 //!
 //! Mechanism:
 //!
 //! 1. `include_str!("../../../README.md")` pulls the workspace-root
 //!    README into the test binary at compile time.
-//! 2. A tiny parser finds the **first** triple-back-tick `rust`
-//!    fenced block and returns the body verbatim.
-//! 3. The body is written into a `*.rs` file in a tempdir alongside
-//!    a hand-curated `Cargo.toml` that depends on the same `obj`,
-//!    `serde`, and `tempfile` paths the rest of the test suite uses.
-//! 4. `cargo build` against the generated crate must exit `0`. Any
-//!    breakage in the README snippet — wrong type name, removed
-//!    method, missing import — fails the test long before docs
-//!    review notices.
+//! 2. A tiny parser collects the body of every triple-back-tick `rust`
+//!    fenced block, in document order.
+//! 3. Each body is written into its own `*.rs` file in a tempdir crate
+//!    alongside a hand-curated `Cargo.toml` that depends on the same
+//!    `obj`, `serde`, and `tempfile` paths the rest of the suite uses.
+//!    A block that already declares `fn main` is written verbatim;
+//!    every other block (item-only definitions, or statements that use
+//!    `?`) is wrapped in `fn main() -> obj::Result<()> { … Ok(()) }`,
+//!    mirroring how rustdoc auto-wraps a doctest without its own `main`.
+//! 4. `cargo build` against each generated crate must exit `0`. Any
+//!    breakage in a README snippet — wrong type name, removed method,
+//!    a changed `default_with` signature, a renamed `Config` knob —
+//!    fails the test long before docs review notices.
 
 #![cfg(unix)]
 // allow: test-support code — `expect`/`?` panics and error returns are the test's
@@ -21,50 +25,69 @@
 #![allow(clippy::missing_panics_doc, clippy::missing_errors_doc)]
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const README: &str = include_str!("../../../README.md");
 
-/// Find the first triple-backtick `rust` fenced block in the README
-/// and return its body. Returns `None` if no such block exists.
-fn first_rust_block(src: &str) -> Option<String> {
-    let mut lines = src.lines();
+/// Hard cap on the number of fenced blocks we will extract — a bounded
+/// loop (Power-of-Ten R2). The README has a handful today; this leaves
+/// generous head-room while still terminating on a malformed file.
+const MAX_BLOCKS: usize = 64;
+
+/// Collect the body of every triple-backtick `rust` fenced block in the
+/// README, in document order. A block's body is the text between its
+/// opening ```` ```rust ```` line and the next ```` ``` ```` line.
+fn all_rust_blocks(src: &str) -> Vec<String> {
+    let mut blocks: Vec<String> = Vec::new();
     let mut body = String::new();
     let mut inside = false;
-    for line in &mut lines {
-        if !inside {
-            let trimmed = line.trim_start();
-            if let Some(rest) = trimmed.strip_prefix("```") {
-                let lang = rest.split(|c: char| c.is_whitespace() || c == ',').next()?;
-                if lang == "rust" {
-                    inside = true;
-                }
+    for line in src.lines() {
+        if blocks.len() >= MAX_BLOCKS {
+            break;
+        }
+        if inside {
+            if line.trim_start().starts_with("```") {
+                blocks.push(std::mem::take(&mut body));
+                inside = false;
+            } else {
+                body.push_str(line);
+                body.push('\n');
             }
-        } else if line.trim_start().starts_with("```") {
-            return Some(body);
-        } else {
-            body.push_str(line);
-            body.push('\n');
+        } else if let Some(rest) = line.trim_start().strip_prefix("```") {
+            let lang = rest
+                .split(|c: char| c.is_whitespace() || c == ',')
+                .next()
+                .unwrap_or("");
+            if lang == "rust" {
+                inside = true;
+            }
         }
     }
-    None
+    blocks
 }
 
-/// The first fenced rust block is the quickstart. We check it
-/// compiles by writing it to a fresh tempdir crate and invoking
-/// `cargo build`.
-#[test]
-#[cfg(unix)]
-fn readme_quickstart_compiles() {
-    let snippet = first_rust_block(README).expect("README must contain a ```rust block");
-    assert!(
-        snippet.contains("fn main"),
-        "quickstart snippet must declare its own fn main; got: {snippet}"
-    );
+/// Wrap a snippet so it is a complete program. Blocks that declare
+/// their own `fn main` (the quickstart) are returned verbatim; the rest
+/// — item-only definitions and `?`-using statement blocks — are wrapped
+/// in a `fn main() -> obj::Result<()>` so `?` resolves and any declared
+/// items live in a valid scope. A crate-level `#![allow(dead_code,
+/// unused)]` keeps illustrative-but-unused snippets warning-free without
+/// touching the README prose.
+fn as_program(snippet: &str) -> String {
+    if snippet.contains("fn main") {
+        format!("#![allow(dead_code, unused)]\n{snippet}")
+    } else {
+        format!(
+            "#![allow(dead_code, unused)]\nfn main() -> obj::Result<()> {{\n{snippet}\nOk(())\n}}\n"
+        )
+    }
+}
 
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let crate_dir: PathBuf = tmp.path().to_path_buf();
+/// Write `program` into a fresh single-binary crate under `crate_dir`
+/// and `cargo build` it. Returns the build's exit status alongside the
+/// program text so callers can report the offending source on failure.
+fn compile_program(crate_dir: &Path, program: &str) -> bool {
     fs::create_dir_all(crate_dir.join("src")).expect("mkdir src");
 
     let obj_crate_path = workspace_relative("crates/obj-rs");
@@ -85,20 +108,47 @@ tempfile = "3"
         obj = obj_crate_path.display(),
     );
     fs::write(crate_dir.join("Cargo.toml"), manifest).expect("write manifest");
-    fs::write(crate_dir.join("src").join("main.rs"), &snippet).expect("write snippet");
+    fs::write(crate_dir.join("src").join("main.rs"), program).expect("write program");
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(&cargo)
+    Command::new(&cargo)
         .arg("build")
         .arg("--quiet")
-        .current_dir(&crate_dir)
+        .current_dir(crate_dir)
         .env_remove("RUSTFLAGS")
         .status()
-        .expect("invoke cargo build");
+        .expect("invoke cargo build")
+        .success()
+}
+
+/// Every fenced rust block in the README must compile against the live
+/// `obj` API. Each block is compiled in its own throwaway crate.
+#[test]
+#[cfg(unix)]
+fn readme_blocks_compile() {
+    let blocks = all_rust_blocks(README);
     assert!(
-        status.success(),
-        "README quickstart failed to compile; snippet was:\n---\n{snippet}\n---"
+        !blocks.is_empty(),
+        "README must contain at least one ```rust block"
     );
+
+    // The first block is the quickstart and is expected to be a
+    // complete program with its own `fn main`.
+    assert!(
+        blocks[0].contains("fn main"),
+        "quickstart snippet must declare its own fn main; got: {}",
+        blocks[0]
+    );
+
+    for (i, snippet) in blocks.iter().enumerate() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let program = as_program(snippet);
+        assert!(
+            compile_program(tmp.path(), &program),
+            "README rust block #{} failed to compile; program was:\n---\n{program}\n---",
+            i + 1,
+        );
+    }
 }
 
 /// Walk up from `CARGO_MANIFEST_DIR` until we hit the workspace
