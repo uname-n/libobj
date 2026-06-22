@@ -44,6 +44,11 @@ use crate::platform::{remove_file_if_exists, FileBackend, FileHandle, SyncMode};
 /// - [`Error::BackupDestinationExists`] if `dest` already exists.
 /// - [`Error::BackupNotSupportedForMemoryPager`] if `source` is an
 ///   in-memory pager.
+/// - [`Error::BackupNotSupportedForEncryptedPager`] if `source` is
+///   an encryption-capable pager. The copy path reads decrypted
+///   plaintext bodies; writing them under the source's encrypted
+///   header would yield an unrecoverable file, so the backup is
+///   refused up front.
 /// - [`Error::Io`] on any syscall failure during the copy.
 /// - [`Error::InvalidFormat`] / [`Error::Corruption`] propagated
 ///   from the source header decode (the source's header bytes are
@@ -56,6 +61,9 @@ pub fn backup_pager_to_path<F: FileBackend>(
     let dest_path = dest.as_ref().to_path_buf();
     if source.is_memory_backed() {
         return Err(Error::BackupNotSupportedForMemoryPager);
+    }
+    if source.is_encryption_capable() {
+        return Err(Error::BackupNotSupportedForEncryptedPager);
     }
     if dest_path.exists() {
         return Err(Error::BackupDestinationExists { path: dest_path });

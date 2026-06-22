@@ -1218,6 +1218,10 @@ impl Db {
     ///   exists.
     /// - [`Error::BackupNotSupportedForMemoryPager`] when called on
     ///   a `Db` constructed via [`Db::memory`] / [`Db::memory_with`].
+    /// - [`Error::BackupNotSupportedForEncryptedPager`] when called
+    ///   on a `Db` opened with an encryption key. The hot-backup
+    ///   copy path is plaintext-only; re-encrypting each page for the
+    ///   destination is deferred to a future minor.
     /// - [`Error::Io`] on syscall failure during the copy.
     pub fn backup_to<P: AsRef<std::path::Path>>(&self, dest: P) -> Result<()> {
         let guard = obj_core::WriteTxn::begin(&self.env, self.busy_timeout)?;

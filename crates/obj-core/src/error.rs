@@ -545,6 +545,15 @@ pub enum Error {
     #[error("backup_to is not supported for in-memory pagers")]
     BackupNotSupportedForMemoryPager,
 
+    /// `Db::backup_to` was called on an encryption-capable
+    /// database. The hot-backup path reads decrypted plaintext page
+    /// bodies and would write them at the plaintext stride while the
+    /// copied header still declares the file encrypted — producing a
+    /// self-inconsistent, unrecoverable file. Re-encrypting each page
+    /// for its destination slot is deferred to a future minor.
+    #[error("backup_to is not supported for encryption-capable pagers")]
+    BackupNotSupportedForEncryptedPager,
+
     /// `Db::attach` was called with a namespace already
     /// registered on the calling `Db`. Detach the existing
     /// attachment first or pick a different namespace.
