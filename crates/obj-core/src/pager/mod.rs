@@ -1281,17 +1281,51 @@ impl<F: FileBackend> Pager<F> {
     /// recovery time across writers without surfacing as a separate
     /// API call to the caller.
     ///
+    /// The inline auto-checkpoint is **non-fatal to the commit**: it
+    /// runs only after the WAL durability step has succeeded, so if it
+    /// fails (e.g. ENOSPC/EIO on the main file) the commit still
+    /// returns Ok — the frames are durable in the WAL, the in-memory
+    /// view is left intact, and the next commit re-tries the
+    /// checkpoint. This is the failure-atomicity guarantee: a commit
+    /// that returns Ok is committed; a commit's durably-written header
+    /// frame is never rewound by a later checkpoint failure.
+    ///
     /// For in-memory pagers (no WAL) this is a no-op returning `0`.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`] on syscall failure.
+    /// Returns [`Error::Io`] only if the WAL durability step fails; a
+    /// failed auto-checkpoint is swallowed (deferred), not surfaced.
     pub fn commit(&mut self) -> Result<Lsn> {
+        // WAL durability step. Once this returns Ok the transaction is
+        // committed: its frames (pending pages + the page-0 header
+        // frame) are durable in the WAL and will be replayed on the
+        // next open.
         let lsn = self.commit_inner()?;
-        if let Some(state) = self.wal.as_ref() {
-            if state.wal.committed_frames() >= self.config.checkpoint_threshold {
-                self.checkpoint()?;
+        // Auto-checkpoint is best-effort cleanup that runs AFTER
+        // durability. A failure here (e.g. ENOSPC/EIO writing the main
+        // file) must NOT fail the commit: the frames are already
+        // durable, `checkpoint` leaves the in-memory view intact on
+        // failure, and the next commit re-tries (committed_frames is
+        // still over threshold). Propagating the error would let
+        // `WriteTxn::Drop` rewind the header snapshot over a
+        // transaction the WAL has already committed — resurrecting it
+        // on reopen and diverging same-process reads from post-recovery
+        // reads. Treat it as a deferred checkpoint instead.
+        let needs_checkpoint = match self.wal.as_ref() {
+            Some(state) => state.wal.committed_frames() >= self.config.checkpoint_threshold,
+            None => false,
+        };
+        if needs_checkpoint {
+            #[cfg(feature = "tracing")]
+            if let Err(err) = self.checkpoint() {
+                tracing::warn!(
+                    error = ?err,
+                    "auto-checkpoint deferred after failure; committed frames remain durable in the WAL"
+                );
             }
+            #[cfg(not(feature = "tracing"))]
+            let _ = self.checkpoint();
         }
         Ok(lsn)
     }
@@ -1427,6 +1461,12 @@ impl<F: FileBackend> Pager<F> {
     /// In-memory pagers have no WAL; `checkpoint` is a no-op for
     /// them.
     ///
+    /// Failure-atomic: the in-memory committed view (and staged page-0
+    /// header) is only dropped after the WHOLE checkpoint succeeds. If
+    /// any step returns `Err`, the overlay is left intact so the frames
+    /// — still durable in the WAL — remain visible to same-process
+    /// reads and to a later retry.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Io`] on syscall failure.
@@ -1440,20 +1480,37 @@ impl<F: FileBackend> Pager<F> {
             tracing::debug!(reason = "reader_pin", "deferred");
             return Ok(());
         }
-        let (view_pages, drained_header): (Vec<(PageId, Arc<Page>)>, Option<Page>) =
-            if let Some(state) = self.wal.as_mut() {
-                let pages: Vec<(PageId, Arc<Page>)> = state.view.drain().collect();
-                let hdr = state.view_header.take();
-                (pages, hdr)
+        // Clone (do NOT drain) the committed view. A mid-checkpoint
+        // I/O failure must leave the in-memory overlay intact: the
+        // frames are still durable in the WAL, so same-process reads
+        // and any later retry must continue to observe them. The
+        // overlay is dropped only after the WHOLE checkpoint (main
+        // write-back + salt rotation) has succeeded — at which point
+        // the main file is authoritative and the WAL has been
+        // truncated. The Arc clones are pointer-only; this is the
+        // amortised once-per-threshold path, never a read hot path.
+        let (view_pages, staged_header): (Vec<(PageId, Arc<Page>)>, Option<Page>) =
+            if let Some(state) = self.wal.as_ref() {
+                let pages: Vec<(PageId, Arc<Page>)> = state
+                    .view
+                    .iter()
+                    .map(|(id, page)| (*id, Arc::clone(page)))
+                    .collect();
+                (pages, state.view_header.clone())
             } else {
                 return Ok(());
             };
-        let nothing_to_do = view_pages.is_empty() && drained_header.is_none();
-        self.apply_checkpoint_view(view_pages, drained_header)?;
+        let nothing_to_do = view_pages.is_empty() && staged_header.is_none();
+        self.apply_checkpoint_view(&view_pages, staged_header.as_ref())?;
         if nothing_to_do {
             return Ok(());
         }
-        self.rotate_wal_salt_and_persist()
+        self.rotate_wal_salt_and_persist()?;
+        if let Some(state) = self.wal.as_mut() {
+            state.view.clear();
+            state.view_header = None;
+        }
+        Ok(())
     }
 
     /// Returns `true` when a live MVCC reader has pinned an LSN below
@@ -1477,15 +1534,15 @@ impl<F: FileBackend> Pager<F> {
     /// are durable before the salt rotation.
     fn apply_checkpoint_view(
         &mut self,
-        view_pages: Vec<(PageId, Arc<Page>)>,
-        drained_header: Option<Page>,
+        view_pages: &[(PageId, Arc<Page>)],
+        staged_header: Option<&Page>,
     ) -> Result<()> {
-        self.grow_main_to_cover(&view_pages)?;
+        self.grow_main_to_cover(view_pages)?;
         for (id, page) in view_pages {
-            self.write_back_page(id, page.as_ref())?;
-            let _ = self.cache.evict(id);
+            self.write_back_page(*id, page.as_ref())?;
+            let _ = self.cache.evict(*id);
         }
-        if let Some(hp) = drained_header {
+        if let Some(hp) = staged_header {
             match &mut self.backend {
                 Backend::File(handle) => handle.write_all_at(hp.as_bytes(), 0)?,
                 Backend::Memory(bytes) => {

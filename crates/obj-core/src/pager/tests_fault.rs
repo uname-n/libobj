@@ -628,3 +628,150 @@ pub(crate) fn snapshot_expected_pages<F: crate::FileBackend>(
     }
     Ok(out)
 }
+
+/// A `FileBackend` that fails every mutating syscall (`write_all_at`,
+/// `set_len`, `sync_data`) once `armed`, while reads and `sync_all`
+/// always delegate to the wrapped real handle. Used to make the inline
+/// auto-checkpoint fail with a HARD I/O error AFTER the WAL commit has
+/// already made the txn durable — the existing `FaultPlan` modes only
+/// model torn/dropped writes (silent `Ok`) or panics, never a returned
+/// `Err`, so this is the missing shape for issue #2's regression.
+struct ArmedFailHandle {
+    inner: FileHandle,
+    armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ArmedFailHandle {
+    fn fail_if_armed(&self, op: &'static str) -> crate::Result<()> {
+        if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(crate::Error::Io(std::io::Error::other(op)));
+        }
+        Ok(())
+    }
+}
+
+impl crate::FileBackend for ArmedFailHandle {
+    fn len(&self) -> crate::Result<u64> {
+        self.inner.len()
+    }
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> crate::Result<()> {
+        self.inner.read_exact_at(buf, offset)
+    }
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> crate::Result<()> {
+        self.fail_if_armed("fault-injected write_all_at failure")?;
+        self.inner.write_all_at(buf, offset)
+    }
+    fn set_len(&self, new_len: u64) -> crate::Result<()> {
+        self.fail_if_armed("fault-injected set_len failure")?;
+        self.inner.set_len(new_len)
+    }
+    fn sync_data(&self, mode: crate::platform::SyncMode) -> crate::Result<()> {
+        self.fail_if_armed("fault-injected sync_data failure")?;
+        self.inner.sync_data(mode)
+    }
+    fn sync_all(&self) -> crate::Result<()> {
+        self.inner.sync_all()
+    }
+}
+
+/// Regression for issue #2: once the WAL durability step (`commit_inner`)
+/// has succeeded, a failure of the inline auto-checkpoint must NOT fail
+/// the commit nor rewind the durably-committed transaction.
+///
+/// Scenario: with `checkpoint_threshold = 1`, every non-empty commit
+/// triggers an inline auto-checkpoint. We commit page A while unarmed
+/// (its checkpoint lands A on the main file), then ARM a hard-`Err`
+/// fault on the MAIN backend only and commit page B. B's `commit_inner`
+/// (WAL writes + sync, on the never-armed WAL backend) makes B durable;
+/// the inline auto-checkpoint then fails writing the main file.
+///
+/// Pre-fix, `Pager::commit` propagated that error, `WriteTxn`'s `?` left
+/// `finished == false`, and `WriteTxn::Drop` rewound the page-0 header
+/// snapshot — yet the WAL still held B's committed frames, so a reopen
+/// resurrected B and diverged from the same-process (rewound) state.
+///
+/// Post-fix the commit returns Ok, the in-memory view is left intact,
+/// and B is observed identically same-process and after a reopen-and-
+/// recover.
+#[test]
+fn auto_checkpoint_failure_after_wal_durability_keeps_commit_atomic() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("commit_atomic.obj");
+    let wal_path = wal_path_for(&path);
+
+    // Independent armed flags: only the MAIN backend's flag is ever
+    // armed, so `commit_inner` (WAL only) always succeeds and just the
+    // inline checkpoint's main-file writes fail.
+    let armed_main = Arc::new(AtomicBool::new(false));
+    let main = ArmedFailHandle {
+        inner: FileHandle::open_or_create(&path).expect("main"),
+        armed: Arc::clone(&armed_main),
+    };
+    let wal = ArmedFailHandle {
+        inner: FileHandle::open_or_create(&wal_path).expect("wal"),
+        armed: Arc::new(AtomicBool::new(false)),
+    };
+    let cfg = Config::default().with_checkpoint_threshold(1);
+    let mut p = Pager::<ArmedFailHandle>::open_with_backends(main, wal, wal_path, cfg)
+        .expect("open with backends");
+    p.begin_txn();
+
+    // Baseline: commit A unarmed; its auto-checkpoint succeeds and
+    // lands A on the main file.
+    let a = p.alloc_page().expect("alloc a");
+    let mut a_page = Page::zeroed();
+    a_page.as_bytes_mut()[0] = 0xAA;
+    a_page.as_bytes_mut()[1024] = 0xAAu8.wrapping_mul(3);
+    p.write_page(a, &a_page).expect("stage a");
+    let _ = p.commit().expect("baseline commit a");
+
+    // Arm the main backend, then commit B. commit_inner makes B durable
+    // in the WAL; the inline auto-checkpoint then fails on the main
+    // file. The commit MUST still return Ok.
+    armed_main.store(true, Ordering::SeqCst);
+    let b = p.alloc_page().expect("alloc b");
+    let mut b_page = Page::zeroed();
+    b_page.as_bytes_mut()[0] = 0xBB;
+    b_page.as_bytes_mut()[1024] = 0xBBu8.wrapping_mul(3);
+    p.write_page(b, &b_page).expect("stage b");
+    p.commit()
+        .expect("commit must succeed despite a failed inline auto-checkpoint");
+
+    // Same-process read of B (still armed) sees the committed bytes
+    // from the restored in-memory view — the failed checkpoint did NOT
+    // drop them. B lives in the WAL overlay, so this read never touches
+    // the main backend.
+    let (b_marker, b_tail) = {
+        let r = p.read_page(b).expect("same-process read b");
+        (r.as_bytes()[0], r.as_bytes()[1024])
+    };
+    assert_eq!(b_marker, 0xBB, "same-process read of committed B");
+    assert_eq!(b_tail, 0xBBu8.wrapping_mul(3));
+
+    // Disarm before reading A: A was checkpointed to the main file, so
+    // that read may miss the cache and read through (and incidentally
+    // evict), which must not re-trip the fault.
+    armed_main.store(false, Ordering::SeqCst);
+    let a_marker = p.read_page(a).expect("same-process read a").as_bytes()[0];
+    assert_eq!(a_marker, 0xAA, "A still visible after B's failed checkpoint");
+
+    drop(p);
+
+    // Reopen with a CLEAN pager: recovery replays the WAL (B's frames +
+    // the new page-0 header). B must survive, and post-recovery reads
+    // must AGREE with the same-process reads.
+    let mut p2 = Pager::open(&path, Config::default()).expect("reopen");
+    let b_reopened = p2.read_page(b).expect("post-recovery read b");
+    assert_eq!(
+        b_reopened.as_bytes()[0],
+        b_marker,
+        "B must read identically same-process and post-recovery",
+    );
+    assert_eq!(b_reopened.as_bytes()[1024], b_tail);
+    assert_eq!(b_reopened.as_bytes()[0], 0xBB, "committed B survived reopen");
+    let a_reopened = p2.read_page(a).expect("post-recovery read a");
+    assert_eq!(a_reopened.as_bytes()[0], 0xAA, "baseline A survived reopen");
+}
