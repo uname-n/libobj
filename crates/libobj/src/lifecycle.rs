@@ -10,7 +10,7 @@
 
 use core::ffi::c_char;
 use core::ptr;
-use core::sync::atomic::{AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::ffi::{CStr, CString};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,6 +44,17 @@ const KEY_FIELDS_END_OFFSET: usize =
 const MIN_CONFIG_SIZE: usize =
     core::mem::offset_of!(obj_config_t, skip_open_check) + core::mem::size_of::<bool>();
 
+/// Number of recent error strings a handle retains before the
+/// oldest is reclaimed. Bounds per-handle diagnostic memory at this
+/// many [`CString`]s (never grows without limit, however many errors
+/// a long-lived handle records) while giving a pointer returned by
+/// [`obj_errmsg`] a grace window of this many *subsequent*
+/// error-recording calls — on any thread — before its backing
+/// storage can be freed. See the [`obj_errmsg`] doc for the caller
+/// contract this window implies. Keep this value in sync with the
+/// "16" quoted in that doc-comment (and thus the generated header).
+const ERROR_RING_LEN: usize = 16;
+
 /// Arc-shared interior of an [`obj_db_t`].
 ///
 /// Bundles the [`obj_engine::Db`] with a per-handle `last_error`
@@ -60,20 +71,38 @@ const MIN_CONFIG_SIZE: usize =
 pub(crate) struct DbInner {
     /// The wrapped storage engine handle.
     db: obj_engine::Db,
-    /// Most recent error message recorded against this db handle, as
-    /// a heap [`CString`] reinterpreted via [`CString::into_raw`].
-    /// `null` means "no error recorded yet". Mutated only through
-    /// [`Self::set_error`] (atomic swap-and-free) and freed once in
-    /// [`Drop`].
+    /// Pointer to the most recently recorded error message — exactly
+    /// what [`obj_errmsg`] returns. `null` means "no error recorded
+    /// yet". This is a NON-owning view: the heap [`CString`] it
+    /// points at is owned by `error_ring`, so a concurrent
+    /// [`Self::set_error`] never frees the string a just-returned
+    /// `obj_errmsg` pointer aliases (it lives until displaced from
+    /// the ring, [`ERROR_RING_LEN`] writes later).
     last_error: AtomicPtr<c_char>,
+    /// Ring buffer owning the last [`ERROR_RING_LEN`] error
+    /// [`CString`]s (each as [`CString::into_raw`]). [`Self::set_error`]
+    /// writes the new string into the next slot and frees ONLY the
+    /// string that slot displaced — which is [`ERROR_RING_LEN`]
+    /// errors old, so any reader that observed it has had a full
+    /// grace window. The sole owner of these heap strings; freed once
+    /// in [`Drop`].
+    error_ring: [AtomicPtr<c_char>; ERROR_RING_LEN],
+    /// Monotonic slot cursor; `% ERROR_RING_LEN` selects the
+    /// `error_ring` slot the next [`Self::set_error`] claims.
+    error_seq: AtomicUsize,
 }
 
 impl DbInner {
-    /// Record `msg` as this handle's most recent error, freeing any
-    /// previously-stored message. Builds a [`CString`] from `msg`
-    /// (falling back to a static `"(non-UTF-8 error)"` text if `msg`
-    /// contains an interior NUL), publishes it via an atomic swap,
-    /// and frees the displaced pointer.
+    /// Record `msg` as this handle's most recent error. Builds a
+    /// [`CString`] from `msg` (falling back to a static
+    /// `"(non-UTF-8 error)"` text if `msg` contains an interior NUL),
+    /// parks it in the next `error_ring` slot, and publishes it as
+    /// `last_error`. The only pointer this frees is the one the
+    /// claimed slot displaces — [`ERROR_RING_LEN`] errors old — so a
+    /// pointer a concurrent [`obj_errmsg`] just returned is never
+    /// freed under the reader (it survives until [`ERROR_RING_LEN`]
+    /// further errors recycle its slot). Memory stays bounded at
+    /// [`ERROR_RING_LEN`] strings however many errors are recorded.
     pub(crate) fn set_error(&self, msg: &str) {
         let cstring = match CString::new(msg) {
             Ok(c) => c,
@@ -85,10 +114,17 @@ impl DbInner {
             },
         };
         let raw = cstring.into_raw();
-        let old = self.last_error.swap(raw, Ordering::AcqRel);
-        if !old.is_null() {
-            // SAFETY: a non-null `old` was produced by a prior CString::into_raw on this same slot (set_error is the only writer) and has not been freed, so reclaiming it via from_raw exactly once is sound.
-            drop(unsafe { CString::from_raw(old) });
+        // Claim a ring slot; the string it displaces is ERROR_RING_LEN
+        // errors old, so any reader that observed it has had a full
+        // grace window and we can reclaim it now.
+        let slot = self.error_seq.fetch_add(1, Ordering::AcqRel) % ERROR_RING_LEN;
+        let displaced = self.error_ring[slot].swap(raw, Ordering::AcqRel);
+        // Publish as the latest message any obj_errmsg reader sees;
+        // `raw` lives in the ring, so this view never dangles early.
+        self.last_error.store(raw, Ordering::Release);
+        if !displaced.is_null() {
+            // SAFETY: a non-null `displaced` was produced by a prior CString::into_raw into this ring slot (set_error is the only writer of error_ring) and has not been freed, so reclaiming it via from_raw exactly once is sound.
+            drop(unsafe { CString::from_raw(displaced) });
         }
     }
 
@@ -108,10 +144,16 @@ impl core::ops::Deref for DbInner {
 
 impl Drop for DbInner {
     fn drop(&mut self) {
-        let ptr = *self.last_error.get_mut();
-        if !ptr.is_null() {
-            // SAFETY: a non-null pointer here was produced by CString::into_raw in set_error and not yet freed (Drop runs once, after the final Arc strong ref is released), so reclaiming it once frees the backing CString.
-            drop(unsafe { CString::from_raw(ptr) });
+        // Free every retained ring string. `last_error` is a
+        // non-owning view into `error_ring`, so it is NOT freed here —
+        // doing so would double-free the slot that still owns it. The
+        // loop is bounded by the fixed ERROR_RING_LEN (R2).
+        for slot in &mut self.error_ring {
+            let ptr = *slot.get_mut();
+            if !ptr.is_null() {
+                // SAFETY: a non-null pointer here was produced by CString::into_raw in set_error and not yet freed (Drop runs once, after the final Arc strong ref is released, and each ring slot is reclaimed exactly once by this loop), so reclaiming it frees the backing CString.
+                drop(unsafe { CString::from_raw(ptr) });
+            }
         }
     }
 }
@@ -152,6 +194,8 @@ impl obj_db_t {
             inner: Arc::new(DbInner {
                 db,
                 last_error: AtomicPtr::new(ptr::null_mut()),
+                error_ring: core::array::from_fn(|_| AtomicPtr::new(ptr::null_mut())),
+                error_seq: AtomicUsize::new(0),
             }),
         }
     }
@@ -215,10 +259,21 @@ const NULL_DB_MSG: &[u8] = b"(null db handle)\0";
 /// - a NULL `db` yields a static `"(null db handle)"`;
 /// - a handle with no recorded error yields a static `"(no error)"`.
 ///
-/// The returned pointer is owned by `db` and remains valid until the
-/// next libobj call that records an error on `db` (which frees the
-/// prior string) or until [`obj_close`] frees the handle. The caller
-/// MUST NOT free it.
+/// The returned pointer is owned by `db`; the caller MUST NOT free
+/// it. `db` retains its most recent error strings in a small
+/// fixed-size ring (the last 16), so a returned pointer stays valid
+/// until 16 *further* error-recording calls on `db` — or on any
+/// txn / iter derived from it, including from other threads — have
+/// recycled its ring slot, or until [`obj_close`] frees the handle.
+/// In other words there is a bounded grace window, not single-call
+/// invalidation: a pointer you just obtained is NOT freed out from
+/// under you by one concurrent failing call. Memory stays bounded —
+/// only the most recent 16 strings are kept, however many errors the
+/// handle records over its lifetime.
+///
+/// Still, treat the result like `sqlite3_errmsg`: copy the string
+/// promptly (before driving many more failing calls on the handle)
+/// rather than holding the raw pointer indefinitely.
 ///
 /// # Safety
 ///
