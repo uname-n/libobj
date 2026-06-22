@@ -424,13 +424,10 @@ pub fn walk_freelist<F: FileBackend>(
     reachable: &mut HashSet<PageId>,
     failures: &mut Vec<IntegrityFailure>,
 ) -> Result<u64> {
-    let Some(mut current_raw) = Some(head_raw) else {
-        return Ok(0);
-    };
-    if current_raw == 0 {
+    if head_raw == 0 {
         return Ok(0);
     }
-    let mut current = current_raw;
+    let mut current = head_raw;
     let mut steps: u64 = 0;
     let mut seen: HashSet<PageId> = HashSet::new();
     while current != 0 {
@@ -468,8 +465,7 @@ pub fn walk_freelist<F: FileBackend>(
             failures.push(IntegrityFailure::FreelistChainBroken { page_id: pid.get() });
             return Ok(steps);
         };
-        current_raw = entry.next;
-        current = current_raw;
+        current = entry.next;
     }
     Ok(steps)
 }

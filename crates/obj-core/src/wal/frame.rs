@@ -193,7 +193,7 @@ pub fn decode_frame_header_classified(buf: &[u8], expected_salt: u32) -> FrameDe
 /// would otherwise turn the multiply into a panic.
 ///
 /// `frame_size` is the on-disk per-frame stride
-/// (4160 for unencrypted WALs, 4188 for encrypted ones). Use
+/// (4160 for unencrypted WALs, 4200 for encrypted ones). Use
 /// [`frame_size_for`] to pick the right value.
 #[must_use]
 pub fn frame_offset(frame_index: u64, frame_size: usize) -> u64 {

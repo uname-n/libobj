@@ -760,6 +760,7 @@ fn decode_internal_slot(buf: &[u8; PAGE_SIZE], i: usize) -> Result<(Vec<u8>, u64
 /// Read a u64 LE from `buf` at `offset`. Panics if `offset + 8` is
 /// out of bounds; callers must validate the offset.
 fn read_u64(buf: &[u8; PAGE_SIZE], offset: usize) -> u64 {
+    debug_assert!(offset + 8 <= PAGE_SIZE);
     u64::from_le_bytes([
         buf[offset],
         buf[offset + 1],
