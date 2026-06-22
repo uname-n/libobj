@@ -23,6 +23,8 @@ use obj::{
     obj_txn_begin_read, obj_txn_end_read, OBJ_ERR_NOT_FOUND, OBJ_OK,
 };
 
+use core::ffi::c_char;
+
 fn path_cstr(p: &Path) -> CString {
     CString::new(p.to_string_lossy().into_owned()).expect("non-NUL path")
 }
@@ -92,6 +94,111 @@ fn failing_txn_call_records_specific_message() {
     // The message outlives the txn — it is owned by the db handle.
     assert!(errmsg(db).contains("ghost_collection"));
     // SAFETY: db still open.
+    unsafe { obj_close(db) };
+}
+
+/// Drive one failing call through a fresh read txn so a SPECIFIC
+/// error message naming `coll` is recorded against `db`'s diagnostic
+/// slot (the same keepalive path `obj_count_all` uses in production).
+fn record_ghost_error(db: *mut obj_db_t, coll: &str) {
+    let mut rtxn: *mut obj_read_txn_t = ptr::null_mut();
+    // SAFETY: db valid; rtxn is a writable out-pointer.
+    let code = unsafe { obj_txn_begin_read(db, &raw mut rtxn) };
+    assert_eq!(code, OBJ_OK);
+    let cs = CString::new(coll).expect("non-NUL");
+    let mut count: u64 = 0;
+    // SAFETY: rtxn valid; cs NUL-terminated UTF-8; out_count writable.
+    let code = unsafe { obj_count_all(rtxn, cs.as_ptr(), &raw mut count) };
+    assert_eq!(code, OBJ_ERR_NOT_FOUND);
+    // SAFETY: rtxn valid and not yet ended.
+    unsafe { obj_txn_end_read(rtxn) };
+}
+
+/// Read a raw `obj_errmsg` pointer's bytes into an owned String.
+fn read_ptr(p: *const c_char) -> String {
+    assert!(!p.is_null());
+    // SAFETY: p is a non-null NUL-terminated C string the handle owns.
+    unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+}
+
+/// A pointer obtained from `obj_errmsg` must stay valid and unchanged
+/// after subsequent errors are recorded on the same handle. Under the
+/// old free-on-swap behaviour the first follow-up error freed the
+/// string this pointer aliases — a use-after-free on the next read.
+#[test]
+fn obtained_pointer_survives_later_error_recording() {
+    let (_dir, db) = open_db("errmsg-survive.obj");
+
+    record_ghost_error(db, "alpha_ghost");
+    // SAFETY: db valid; obj_errmsg never returns NULL.
+    let p = unsafe { obj_errmsg(db) };
+    let original = read_ptr(p);
+    assert!(original.contains("alpha_ghost"), "got {original:?}");
+
+    // Several more errors (still within the 16-deep ring grace window).
+    for i in 0..8 {
+        record_ghost_error(db, &format!("beta_ghost_{i}"));
+    }
+
+    // The earlier pointer is still valid and its bytes are untouched.
+    assert_eq!(
+        read_ptr(p),
+        original,
+        "earlier obj_errmsg pointer was freed or mutated"
+    );
+
+    // SAFETY: db still open.
+    unsafe { obj_close(db) };
+}
+
+/// `*mut obj_db_t` wrapper that crosses a thread boundary in the
+/// concurrent test. `obj_db_t` itself asserts `Send + Sync` in
+/// `lifecycle.rs`, and its FFI surface is internally synchronised, so
+/// sharing the raw handle across threads is sound; the raw pointer's
+/// own `!Send` is what this newtype overrides.
+struct SendDb(*mut obj_db_t);
+// SAFETY: obj_db_t is Send + Sync (asserted in lifecycle.rs); its FFI
+// surface is internally synchronised, so the raw handle may cross the
+// thread boundary.
+unsafe impl Send for SendDb {}
+
+/// The cross-thread shape from the report: thread A obtains a pointer,
+/// thread B records errors on the SAME shared handle, A's pointer must
+/// remain valid. `obj_db_t` asserts `Send + Sync`, so the raw handle
+/// is legitimately shared here.
+#[test]
+fn obtained_pointer_survives_concurrent_set_error() {
+    let (_dir, db) = open_db("errmsg-concurrent.obj");
+
+    record_ghost_error(db, "main_ghost");
+    // SAFETY: db valid; obj_errmsg never returns NULL.
+    let p = unsafe { obj_errmsg(db) };
+    let original = read_ptr(p);
+    assert!(original.contains("main_ghost"), "got {original:?}");
+
+    // Share the handle with a worker thread that records more errors.
+    let shared = SendDb(db);
+    let worker = std::thread::spawn(move || {
+        // Bind the whole `SendDb` first so the closure captures the
+        // Send newtype as a unit (disjoint closure captures would
+        // otherwise grab the inner `*mut obj_db_t` field directly,
+        // which is not Send) before destructuring it.
+        let shared = shared;
+        let db = shared.0;
+        for i in 0..4 {
+            record_ghost_error(db, &format!("other_ghost_{i}"));
+        }
+    });
+    worker.join().expect("worker thread joined");
+
+    // A's pointer survived B's concurrent error recording.
+    assert_eq!(
+        read_ptr(p),
+        original,
+        "concurrent set_error freed a pointer obj_errmsg had returned"
+    );
+
+    // SAFETY: db still open (worker has finished and joined).
     unsafe { obj_close(db) };
 }
 

@@ -709,10 +709,21 @@ obj_error_t obj_doc_upsert_raw(obj_write_txn_t *txn,
  * - a NULL `db` yields a static `"(null db handle)"`;
  * - a handle with no recorded error yields a static `"(no error)"`.
  *
- * The returned pointer is owned by `db` and remains valid until the
- * next libobj call that records an error on `db` (which frees the
- * prior string) or until [`obj_close`] frees the handle. The caller
- * MUST NOT free it.
+ * The returned pointer is owned by `db`; the caller MUST NOT free
+ * it. `db` retains its most recent error strings in a small
+ * fixed-size ring (the last 16), so a returned pointer stays valid
+ * until 16 *further* error-recording calls on `db` — or on any
+ * txn / iter derived from it, including from other threads — have
+ * recycled its ring slot, or until [`obj_close`] frees the handle.
+ * In other words there is a bounded grace window, not single-call
+ * invalidation: a pointer you just obtained is NOT freed out from
+ * under you by one concurrent failing call. Memory stays bounded —
+ * only the most recent 16 strings are kept, however many errors the
+ * handle records over its lifetime.
+ *
+ * Still, treat the result like `sqlite3_errmsg`: copy the string
+ * promptly (before driving many more failing calls on the handle)
+ * rather than holding the raw pointer indefinitely.
  *
  * # Safety
  *
