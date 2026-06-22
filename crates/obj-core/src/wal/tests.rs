@@ -425,6 +425,107 @@ fn encrypted_torn_tail_partial_body_recovers_committed_prefix() {
     assert!(!recovered.view.contains_key(&id(2)));
 }
 
+/// A bit-flip in the ciphertext body of a committed frame that sits
+/// **before** the last commit marker must be classified as
+/// `Error::WalCorruption`, NOT `Error::EncryptionKeyInvalid`: the later
+/// commit marker decrypts and CRC-validates under the same key, which
+/// proves the key is correct — so the only explanation for the earlier
+/// frame failing to decrypt is corruption of a committed frame. Before
+/// the fix this fail-closed path mislabeled the cause as a wrong key.
+#[cfg(feature = "encryption")]
+#[test]
+fn encrypted_committed_frame_corruption_before_marker_is_wal_corruption() {
+    use crate::platform::FileHandle;
+    use crate::wal::frame::{FRAME_HEADER_SIZE, WAL_HEADER_SIZE};
+
+    let key = [0x3Bu8; 32];
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("enc.obj-wal");
+    let salt = {
+        let mut wal = Wal::create_fresh(&path, WalConfig::default()).expect("create");
+        wal.set_key(Some(key));
+        // Two independent commits: frame 0 (id 1) and frame 1 (id 2).
+        // Frame 1 is the last commit marker; frame 0 precedes it.
+        let mut t = wal.begin_txn();
+        t.append(id(1), &page_with(0xAA)).expect("a1");
+        t.commit().expect("commit 1");
+        let mut t = wal.begin_txn();
+        t.append(id(2), &page_with(0xBB)).expect("a2");
+        t.commit().expect("commit 2 (last marker)");
+        wal.salt()
+    };
+    // Flip one byte inside the FIRST frame's ciphertext body (past its
+    // 64-byte plaintext header so the generation salt stays intact).
+    // The second frame's commit marker is left untouched, so it still
+    // decrypts — proving the key is correct.
+    {
+        use std::fs::OpenOptions;
+        use std::io::{Read as _, Seek, SeekFrom, Write as _};
+        let flip_at = WAL_HEADER_SIZE as u64 + FRAME_HEADER_SIZE as u64 + 128;
+        let mut f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open wal rw");
+        f.seek(SeekFrom::Start(flip_at)).expect("seek");
+        let mut byte = [0u8; 1];
+        f.read_exact(&mut byte).expect("read body byte");
+        byte[0] ^= 0x40;
+        f.seek(SeekFrom::Start(flip_at)).expect("seek back");
+        f.write_all(&byte).expect("flip body byte");
+    }
+    let file = FileHandle::open_or_create(&path).expect("reopen wal");
+    let err = Wal::<FileHandle>::open_for_recovery_with_key(
+        &file,
+        salt,
+        WalConfig::default().size_limit,
+        Some(key),
+    )
+    .expect_err("corrupt committed frame must surface an error");
+    let expected_offset = WAL_HEADER_SIZE as u64;
+    assert!(
+        matches!(err, crate::Error::WalCorruption { frame_offset } if frame_offset == expected_offset),
+        "decrypt failure before a valid commit marker must be WalCorruption, not EncryptionKeyInvalid; got {err:?}"
+    );
+}
+
+/// With NO commit marker anywhere (the whole generation is
+/// undecryptable), a salt-matching decrypt failure must STILL surface
+/// as `Error::EncryptionKeyInvalid` — the wrong-key smoking gun. This
+/// guards the unchanged branch of the classification.
+#[cfg(feature = "encryption")]
+#[test]
+fn encrypted_no_commit_marker_decrypt_failure_is_wrong_key() {
+    use crate::platform::FileHandle;
+
+    let right_key = [0x11u8; 32];
+    let wrong_key = [0x22u8; 32];
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("enc.obj-wal");
+    let salt = {
+        let mut wal = Wal::create_fresh(&path, WalConfig::default()).expect("create");
+        wal.set_key(Some(right_key));
+        let mut t = wal.begin_txn();
+        t.append(id(1), &page_with(0xAA)).expect("a1");
+        t.commit().expect("commit 1");
+        wal.salt()
+    };
+    // Open with the WRONG key: no frame decrypts, so no commit marker is
+    // ever found and the whole generation is undecryptable.
+    let file = FileHandle::open_or_create(&path).expect("reopen wal");
+    let err = Wal::<FileHandle>::open_for_recovery_with_key(
+        &file,
+        salt,
+        WalConfig::default().size_limit,
+        Some(wrong_key),
+    )
+    .expect_err("wrong key must be refused");
+    assert!(
+        matches!(err, crate::Error::EncryptionKeyInvalid),
+        "no commit marker + decrypt failure must stay EncryptionKeyInvalid; got {err:?}"
+    );
+}
+
 /// Write a multi-frame transaction that INCLUDES a page-0
 /// (header) frame, then recover it. Proves the `is_header` bool +
 /// the reused frame scratch produce a WAL whose header frame is
