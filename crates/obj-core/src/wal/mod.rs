@@ -760,15 +760,26 @@ fn walk_frames<F: FileBackend>(
         // so a decrypt failure AT or PAST it is an ordinary torn tail
         // (plaintext header persisted, ciphertext body partial or
         // bit-flipped) and is discarded exactly as the plaintext path
-        // discards a bad-CRC tail. We escalate to
-        // `EncryptionKeyInvalid` only when the failure precedes the
-        // last commit marker, or when no commit marker was found at all
-        // (the whole generation is undecryptable — the wrong-key
-        // smoking gun). `first_decrypt_failure_offset` is the earliest
-        // such offset, so checking it covers every later failure too.
-        let torn_tail_past_commit =
-            scan.last_commit_end > WAL_HEADER_SIZE as u64 && fail_off >= scan.last_commit_end;
+        // discards a bad-CRC tail.
+        //
+        // A failure *before* the commit marker is handled by the marker
+        // itself: because that marker decrypted and CRC-validated under
+        // the same key, the key is provably correct, so the failure is
+        // **corruption of a committed frame** (`WalCorruption`), not a
+        // wrong key. We escalate to `EncryptionKeyInvalid` only when no
+        // commit marker was found at all (the whole generation is
+        // undecryptable — the wrong-key smoking gun). Either way the
+        // open is refused (fail-closed); only the reported cause
+        // differs. `first_decrypt_failure_offset` is the earliest such
+        // offset, so checking it covers every later failure too.
+        let has_commit_marker = scan.last_commit_end > WAL_HEADER_SIZE as u64;
+        let torn_tail_past_commit = has_commit_marker && fail_off >= scan.last_commit_end;
         if !torn_tail_past_commit {
+            if has_commit_marker {
+                return Err(Error::WalCorruption {
+                    frame_offset: fail_off,
+                });
+            }
             return Err(Error::EncryptionKeyInvalid);
         }
     }
