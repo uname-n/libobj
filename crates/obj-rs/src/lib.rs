@@ -193,10 +193,12 @@
 //! [`Db::backup_to`] writes a self-contained `.obj` file at the
 //! LSN of an internally-taken reader snapshot. Writers continue
 //! against the source; post-snapshot writes are NOT in the
-//! destination. Two failure modes:
-//! [`Error::BackupDestinationExists`] (refuses to overwrite) and
+//! destination. Three failure modes:
+//! [`Error::BackupDestinationExists`] (refuses to overwrite),
 //! [`Error::BackupNotSupportedForMemoryPager`] (in-memory dbs have
-//! no file backend to copy from).
+//! no file backend to copy from), and
+//! [`Error::BackupNotSupportedForEncryptedPager`] (the hot-backup
+//! copy path is plaintext-only).
 //!
 //! [`Db::integrity_check`] runs a full bidirectional walk: every
 //! active collection's primary + index B-trees, freelist sweep,

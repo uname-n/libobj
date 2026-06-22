@@ -247,6 +247,39 @@ fn pager_format_minor_is_two_on_encrypted_file() {
     );
 }
 
+#[test]
+fn backup_of_encrypted_db_is_refused() {
+    let dir = TempDir::new().expect("tmp");
+    let src = dir.path().join("enc.obj");
+    let dst = dir.path().join("backup.obj");
+    {
+        let db = Db::open_with(&src, Config::default().encryption_key(k1())).expect("open");
+        for i in 0..10u32 {
+            db.insert(Doc {
+                title: format!("t-{i}"),
+                body: "b".repeat(64),
+            })
+            .expect("insert");
+        }
+
+        let err = db
+            .backup_to(&dst)
+            .expect_err("backup of an encrypted db must be refused");
+        assert!(
+            matches!(err, Error::BackupNotSupportedForEncryptedPager),
+            "expected BackupNotSupportedForEncryptedPager; got {err:?}"
+        );
+        drop(db);
+    }
+
+    // The refusal happens before any destination file is created,
+    // so no half-written, unrecoverable backup is left behind.
+    assert!(
+        !dst.exists(),
+        "refused backup must not leave a destination file behind"
+    );
+}
+
 #[cfg(feature = "compression")]
 #[test]
 fn compression_and_encryption_set_both_feature_bits() {
