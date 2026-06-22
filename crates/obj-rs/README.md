@@ -12,9 +12,9 @@ Crate name `obj-rs`; import as `obj`.
 **Stability.** The on-disk format is versioned and stable: new databases are
 written at `format_major = 1`, and readers still open older pre-1.0
 (`format_major = 0`) files without a migration tool. The public Rust API is
-still pre-1.0 (`0.4.1`) and is **not** yet frozen under SemVer — it may change
+still pre-1.0 (`0.5.0`) and is **not** yet frozen under SemVer — it may change
 in a future `0.x` release before the 1.0 freeze; pin a specific tag (e.g.
-`tag = "v0.4.1"`) to insulate yourself from breaking changes.
+`tag = "v0.5.0"`) to insulate yourself from breaking changes.
 
 ---
 
@@ -23,7 +23,7 @@ in a future `0.x` release before the 1.0 freeze; pin a specific tag (e.g.
 ```toml
 # Cargo.toml
 [dependencies]
-obj-rs = { git = "https://github.com/uname-n/libobj", tag = "v0.4.1" }
+obj-rs = { git = "https://github.com/uname-n/libobj", tag = "v0.5.0" }
 serde = { version = "1", features = ["derive"] }
 ```
 
@@ -59,7 +59,7 @@ for queries, indexes, transactions, and migrations.
 
 All features are off by default — enable them on the git dependency in
 `Cargo.toml`, e.g.
-`obj-rs = { git = "https://github.com/uname-n/libobj", tag = "v0.4.1", features = ["serde"] }`.
+`obj-rs = { git = "https://github.com/uname-n/libobj", tag = "v0.5.0", features = ["serde"] }`.
 
 | Feature       | What it does                                                                 |
 |---------------|------------------------------------------------------------------------------|
