@@ -308,6 +308,123 @@ fn recover_mid_wal_crc_in_multi_frame_txn_surfaces_corruption() {
     assert!(matches!(err, crate::Error::WalCorruption { .. }));
 }
 
+/// A bit-flip in the body of the LAST frame — past the previous
+/// commit marker — must be treated as an ordinary torn tail on an
+/// ENCRYPTED WAL, exactly as the plaintext path treats a bad-CRC
+/// tail. The salt lives in the plaintext frame header and is excluded
+/// from the AEAD associated data, so the flipped tail frame still
+/// matches the generation salt while Poly1305 fails. Before the fix
+/// this misfired as `Error::EncryptionKeyInvalid` and aborted
+/// recovery; now the committed prefix recovers cleanly.
+#[cfg(feature = "encryption")]
+#[test]
+fn encrypted_tail_frame_bit_flip_recovers_committed_prefix() {
+    use crate::platform::FileHandle;
+    use crate::wal::frame::{FRAME_HEADER_SIZE, FRAME_SIZE_ENCRYPTED, WAL_HEADER_SIZE};
+
+    let key = [0x2Au8; 32];
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("enc.obj-wal");
+    let salt = {
+        let mut wal = Wal::create_fresh(&path, WalConfig::default()).expect("create");
+        wal.set_key(Some(key));
+        let mut t = wal.begin_txn();
+        t.append(id(1), &page_with(0xAA)).expect("a1");
+        t.commit().expect("commit 1");
+        let mut t = wal.begin_txn();
+        t.append(id(2), &page_with(0xBB)).expect("a2");
+        t.commit().expect("commit 2 (becomes torn tail)");
+        wal.salt()
+    };
+    // Flip one byte inside the SECOND frame's ciphertext body (past its
+    // 64-byte plaintext header, so the generation salt stays intact).
+    {
+        use std::fs::OpenOptions;
+        use std::io::{Read as _, Seek, SeekFrom, Write as _};
+        let frame1 = (WAL_HEADER_SIZE + FRAME_SIZE_ENCRYPTED) as u64;
+        let flip_at = frame1 + FRAME_HEADER_SIZE as u64 + 128;
+        let mut f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open wal rw");
+        f.seek(SeekFrom::Start(flip_at)).expect("seek");
+        let mut byte = [0u8; 1];
+        f.read_exact(&mut byte).expect("read body byte");
+        byte[0] ^= 0x40;
+        f.seek(SeekFrom::Start(flip_at)).expect("seek back");
+        f.write_all(&byte).expect("flip body byte");
+    }
+    let file = FileHandle::open_or_create(&path).expect("reopen wal");
+    let recovered = Wal::<FileHandle>::open_for_recovery_with_key(
+        &file,
+        salt,
+        WalConfig::default().size_limit,
+        Some(key),
+    )
+    .expect("torn tail must recover, not report EncryptionKeyInvalid");
+    assert_eq!(recovered.committed_frames, 1);
+    let p1 = recovered.view.get(&id(1)).expect("committed prefix present");
+    assert_eq!(p1.as_bytes()[0], 0xAA);
+    assert!(
+        !recovered.view.contains_key(&id(2)),
+        "torn tail frame must be discarded"
+    );
+}
+
+/// A torn write that persisted the plaintext frame header but left the
+/// ciphertext body only partially written (the file is truncated
+/// mid-body of the final frame) must also recover the committed prefix
+/// on an encrypted WAL rather than aborting with
+/// `Error::EncryptionKeyInvalid`.
+#[cfg(feature = "encryption")]
+#[test]
+fn encrypted_torn_tail_partial_body_recovers_committed_prefix() {
+    use crate::platform::FileHandle;
+    use crate::wal::frame::{FRAME_HEADER_SIZE, FRAME_SIZE_ENCRYPTED, WAL_HEADER_SIZE};
+
+    let key = [0x7Cu8; 32];
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("enc.obj-wal");
+    let salt = {
+        let mut wal = Wal::create_fresh(&path, WalConfig::default()).expect("create");
+        wal.set_key(Some(key));
+        let mut t = wal.begin_txn();
+        t.append(id(1), &page_with(0xAA)).expect("a1");
+        t.commit().expect("commit 1");
+        let mut t = wal.begin_txn();
+        t.append(id(2), &page_with(0xBB)).expect("a2");
+        t.commit().expect("commit 2 (torn below)");
+        wal.salt()
+    };
+    // Truncate so the final frame keeps its 64-byte plaintext header
+    // plus a partial body — a power-loss-during-append signature.
+    {
+        let frame1 = (WAL_HEADER_SIZE + FRAME_SIZE_ENCRYPTED) as u64;
+        let truncate_to = frame1 + FRAME_HEADER_SIZE as u64 + 256;
+        let file = FileHandle::open_or_create(&path).expect("open wal");
+        file.set_len(truncate_to).expect("truncate mid-body");
+    }
+    let file = FileHandle::open_or_create(&path).expect("reopen wal");
+    let recovered = Wal::<FileHandle>::open_for_recovery_with_key(
+        &file,
+        salt,
+        WalConfig::default().size_limit,
+        Some(key),
+    )
+    .expect("partial tail must recover, not report EncryptionKeyInvalid");
+    assert_eq!(recovered.committed_frames, 1);
+    assert_eq!(
+        recovered
+            .view
+            .get(&id(1))
+            .expect("committed prefix present")
+            .as_bytes()[0],
+        0xAA
+    );
+    assert!(!recovered.view.contains_key(&id(2)));
+}
+
 /// Write a multi-frame transaction that INCLUDES a page-0
 /// (header) frame, then recover it. Proves the `is_header` bool +
 /// the reused frame scratch produce a WAL whose header frame is
