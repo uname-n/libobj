@@ -789,4 +789,120 @@ mod tests {
             "snapshot must isolate reader from concurrent commits",
         );
     }
+
+    /// A `FileBackend` that fails every mutating syscall once `armed`.
+    /// Reads always delegate so recovery / snapshot read paths work.
+    /// Used to fail a `WriteTxn`'s inline auto-checkpoint AFTER the WAL
+    /// commit has made the txn durable (issue #2).
+    struct ArmedFailHandle {
+        inner: FileHandle,
+        armed: Arc<AtomicBool>,
+    }
+
+    impl ArmedFailHandle {
+        fn fail_if_armed(&self) -> Result<()> {
+            if self.armed.load(Ordering::SeqCst) {
+                return Err(Error::Io(std::io::Error::other("fault-injected failure")));
+            }
+            Ok(())
+        }
+    }
+
+    impl FileBackend for ArmedFailHandle {
+        fn len(&self) -> Result<u64> {
+            self.inner.len()
+        }
+        fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
+            self.inner.read_exact_at(buf, offset)
+        }
+        fn write_all_at(&self, buf: &[u8], offset: u64) -> Result<()> {
+            self.fail_if_armed()?;
+            self.inner.write_all_at(buf, offset)
+        }
+        fn set_len(&self, new_len: u64) -> Result<()> {
+            self.fail_if_armed()?;
+            self.inner.set_len(new_len)
+        }
+        fn sync_data(&self, mode: crate::platform::SyncMode) -> Result<()> {
+            self.fail_if_armed()?;
+            self.inner.sync_data(mode)
+        }
+        fn sync_all(&self) -> Result<()> {
+            self.inner.sync_all()
+        }
+    }
+
+    /// Issue #2 at the txn layer: a `WriteTxn` whose inline
+    /// auto-checkpoint fails AFTER the WAL durability step must still
+    /// have `commit()` return Ok, so `WriteTxn::Drop` never rewinds the
+    /// page-0 header snapshot over the already-committed transaction.
+    /// The committed page must then survive a reopen, and same-process
+    /// reads must agree with post-recovery reads.
+    #[test]
+    fn write_txn_commit_atomic_against_inline_checkpoint_failure() {
+        let dir = TempDir::new().expect("tmp");
+        let path = dir.path().join("txn_atomic.obj");
+        let wal_path = crate::pager::wal_path_for(&path);
+
+        let armed_main = Arc::new(AtomicBool::new(false));
+        let main = ArmedFailHandle {
+            inner: FileHandle::open_or_create(&path).expect("main"),
+            armed: Arc::clone(&armed_main),
+        };
+        let wal = ArmedFailHandle {
+            inner: FileHandle::open_or_create(&wal_path).expect("wal"),
+            armed: Arc::new(AtomicBool::new(false)),
+        };
+        // threshold = 1 -> every non-empty commit auto-checkpoints.
+        let cfg = Config::default().with_checkpoint_threshold(1);
+        let pager = Pager::<ArmedFailHandle>::open_with_backends(main, wal, wal_path, cfg)
+            .expect("open with backends");
+        let env = TxnEnv::new(pager, None);
+
+        // Baseline txn (unarmed): commit A; its auto-checkpoint succeeds.
+        let a = {
+            let tx = WriteTxn::begin(&env, Duration::from_millis(50)).expect("begin a");
+            let a = tx.alloc_page().expect("alloc a");
+            let mut a_page = Page::zeroed();
+            a_page.as_bytes_mut()[0] = 0xAA;
+            tx.write_page(a, &a_page).expect("write a");
+            tx.commit().expect("commit a");
+            a
+        };
+
+        // Arm, then commit B. commit_inner makes B durable in the WAL;
+        // the inline auto-checkpoint then fails on the main file.
+        // WriteTxn::commit MUST return Ok (pre-fix it returned Err and
+        // Drop rewound the header).
+        armed_main.store(true, Ordering::SeqCst);
+        let b = {
+            let tx = WriteTxn::begin(&env, Duration::from_millis(50)).expect("begin b");
+            let b = tx.alloc_page().expect("alloc b");
+            let mut b_page = Page::zeroed();
+            b_page.as_bytes_mut()[0] = 0xBB;
+            tx.write_page(b, &b_page).expect("write b");
+            tx.commit()
+                .expect("WriteTxn::commit must succeed despite a failed auto-checkpoint");
+            b
+        };
+        armed_main.store(false, Ordering::SeqCst);
+
+        // Same-process snapshot read sees committed B.
+        let b_marker = {
+            let rx = ReadTxn::begin(&env).expect("read");
+            rx.read_page(b).expect("same-process read b").as_bytes()[0]
+        };
+        assert_eq!(b_marker, 0xBB, "committed B visible same-process");
+
+        drop(env);
+
+        // Reopen clean: recovery replays the WAL; B must survive and
+        // agree with the same-process read.
+        let mut p2 = Pager::open(&path, Config::default()).expect("reopen");
+        let b_reopened = p2.read_page(b).expect("recovered b").as_bytes()[0];
+        assert_eq!(b_reopened, b_marker, "B agrees same-process vs post-recovery");
+        assert_eq!(b_reopened, 0xBB, "committed txn survived reopen");
+        let a_reopened = p2.read_page(a).expect("recovered a").as_bytes()[0];
+        assert_eq!(a_reopened, 0xAA, "baseline A survived reopen");
+    }
 }
