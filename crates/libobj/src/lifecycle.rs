@@ -10,14 +10,15 @@
 
 use core::ffi::c_char;
 use core::ptr;
-use std::ffi::CStr;
+use core::sync::atomic::{AtomicPtr, Ordering};
+use std::ffi::{CStr, CString};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::{
-    catch_ffi, catch_ffi_void, error_to_code, obj_error_t, OBJ_ERR_INVALID_ARG, OBJ_ERR_PANIC,
-    OBJ_ERR_UTF8, OBJ_OK,
+    catch_ffi, catch_ffi_or, catch_ffi_void, error_to_code, obj_error_t, OBJ_ERR_INVALID_ARG,
+    OBJ_ERR_PANIC, OBJ_ERR_UTF8, OBJ_OK,
 };
 
 /// Smallest `struct_size` byte count that fully covers the
@@ -43,12 +44,86 @@ const KEY_FIELDS_END_OFFSET: usize =
 const MIN_CONFIG_SIZE: usize =
     core::mem::offset_of!(obj_config_t, skip_open_check) + core::mem::size_of::<bool>();
 
+/// Arc-shared interior of an [`obj_db_t`].
+///
+/// Bundles the [`obj_engine::Db`] with a per-handle `last_error`
+/// diagnostic slot. It lives behind an [`Arc`] so the txn / iter
+/// FFI modules can keep it alive past the original [`obj_open`]
+/// return point — and, crucially, reach the SAME `last_error` slot
+/// the owning [`obj_db_t`] exposes through [`obj_errmsg`]. A
+/// transaction that fails records its specific reason here, and the
+/// C caller retrieves it via `obj_errmsg(db)` on the originating db
+/// handle.
+///
+/// [`Deref`](core::ops::Deref) to [`obj_engine::Db`] keeps every
+/// existing `db_arc.<engine method>()` call site working unchanged.
+pub(crate) struct DbInner {
+    /// The wrapped storage engine handle.
+    db: obj_engine::Db,
+    /// Most recent error message recorded against this db handle, as
+    /// a heap [`CString`] reinterpreted via [`CString::into_raw`].
+    /// `null` means "no error recorded yet". Mutated only through
+    /// [`Self::set_error`] (atomic swap-and-free) and freed once in
+    /// [`Drop`].
+    last_error: AtomicPtr<c_char>,
+}
+
+impl DbInner {
+    /// Record `msg` as this handle's most recent error, freeing any
+    /// previously-stored message. Builds a [`CString`] from `msg`
+    /// (falling back to a static `"(non-UTF-8 error)"` text if `msg`
+    /// contains an interior NUL), publishes it via an atomic swap,
+    /// and frees the displaced pointer.
+    pub(crate) fn set_error(&self, msg: &str) {
+        let cstring = match CString::new(msg) {
+            Ok(c) => c,
+            Err(_) => match CString::new("(non-UTF-8 error)") {
+                Ok(c) => c,
+                // The literal contains no interior NUL, so this arm is
+                // unreachable; bail without recording rather than panic.
+                Err(_) => return,
+            },
+        };
+        let raw = cstring.into_raw();
+        let old = self.last_error.swap(raw, Ordering::AcqRel);
+        if !old.is_null() {
+            // SAFETY: a non-null `old` was produced by a prior CString::into_raw on this same slot (set_error is the only writer) and has not been freed, so reclaiming it via from_raw exactly once is sound.
+            drop(unsafe { CString::from_raw(old) });
+        }
+    }
+
+    /// Load the stored error pointer (`null` if none recorded).
+    fn last_error_ptr(&self) -> *const c_char {
+        self.last_error.load(Ordering::Acquire).cast_const()
+    }
+}
+
+impl core::ops::Deref for DbInner {
+    type Target = obj_engine::Db;
+
+    fn deref(&self) -> &Self::Target {
+        &self.db
+    }
+}
+
+impl Drop for DbInner {
+    fn drop(&mut self) {
+        let ptr = *self.last_error.get_mut();
+        if !ptr.is_null() {
+            // SAFETY: a non-null pointer here was produced by CString::into_raw in set_error and not yet freed (Drop runs once, after the final Arc strong ref is released), so reclaiming it once frees the backing CString.
+            drop(unsafe { CString::from_raw(ptr) });
+        }
+    }
+}
+
 /// Opaque database handle.
 ///
 /// Created by [`obj_open`] / [`obj_open_with_config`]; freed by
-/// [`obj_close`]. The Rust side holds an [`Arc<obj_engine::Db>`] so
-/// future transaction handles can each hold an
-/// `Arc` to outlive the original [`obj_open`] return point.
+/// [`obj_close`]. The Rust side holds an [`Arc<DbInner>`] (the
+/// engine handle plus a `last_error` diagnostic slot) so future
+/// transaction handles can each hold an `Arc` to outlive the
+/// original [`obj_open`] return point AND reach the shared
+/// `last_error` slot for [`obj_errmsg`].
 ///
 /// The struct is **opaque to C**: cbindgen emits a forward
 /// declaration only (`typedef struct obj_db_t obj_db_t;`). The
@@ -56,33 +131,113 @@ const MIN_CONFIG_SIZE: usize =
 /// not C-compatible — C callers only ever see pointer-shaped
 /// access via the API below.
 pub struct obj_db_t {
-    /// The Arc-wrapped [`obj_engine::Db`]. Boxed-on-the-heap inside
+    /// The Arc-wrapped [`DbInner`]. Boxed-on-the-heap inside
     /// `obj_open*`; the wrapping `Box<obj_db_t>` is freed by
-    /// `obj_close` via [`Box::from_raw`], which drops the field
-    /// (releasing the final Arc strong reference and the
-    /// underlying file locks). Read via [`Self::db_arc`] by the
-    /// sibling FFI modules (txn / queries).
-    inner: Arc<obj_engine::Db>,
+    /// `obj_close` via [`Box::from_raw`], which drops this field
+    /// (decrementing the Arc; the last strong reference releases the
+    /// Db's file locks and frees any stored `last_error`). Read via
+    /// [`Self::db_arc`] / [`Self::inner_ref`] by the sibling FFI
+    /// modules (txn / queries).
+    inner: Arc<DbInner>,
 }
 
 impl obj_db_t {
     /// Wrap an [`obj_engine::Db`] into a heap-allocated handle the C side
     /// holds as `obj_db_t *`. The wrapped value is stored behind
-    /// an [`Arc`] so transaction-handle modules can `Arc::clone`
-    /// to outlive the original `obj_open` return point on the C
-    /// side.
+    /// an [`Arc<DbInner>`] so transaction-handle modules can
+    /// `Arc::clone` to outlive the original `obj_open` return point
+    /// on the C side. The `last_error` slot starts empty.
     pub(crate) fn new(db: obj_engine::Db) -> Self {
         Self {
-            inner: Arc::new(db),
+            inner: Arc::new(DbInner {
+                db,
+                last_error: AtomicPtr::new(ptr::null_mut()),
+            }),
         }
     }
 
-    /// Cloneable [`Arc`] handle on the wrapped Db. Used by the FFI
-    /// txn / iter modules to keep the Db alive past the original
-    /// `obj_open` return point.
-    pub(crate) fn db_arc(&self) -> Arc<obj_engine::Db> {
+    /// Cloneable [`Arc`] handle on the wrapped [`DbInner`]. Used by
+    /// the FFI txn / iter modules to keep the Db (and its shared
+    /// `last_error` slot) alive past the original `obj_open` return
+    /// point.
+    pub(crate) fn db_arc(&self) -> Arc<DbInner> {
         Arc::clone(&self.inner)
     }
+
+    /// Borrow the shared [`DbInner`] — used to record an error
+    /// against this handle from the db-direct entry points.
+    pub(crate) fn inner_ref(&self) -> &DbInner {
+        &self.inner
+    }
+}
+
+/// Record `msg` as `db`'s most recent error. Crate-internal helper
+/// matching the diagnostic contract documented on [`obj_errmsg`]:
+/// the db-handle entry point that the db-direct FFI calls use to
+/// stash a specific reason against the originating handle.
+pub(crate) fn set_db_error(db: &obj_db_t, msg: &str) {
+    db.inner.set_error(msg);
+}
+
+/// Record `e`'s specific message against the db-handle `db` and
+/// return its [`obj_error_t`] code. The one-call shape the db-direct
+/// `Err(e)` paths (stat / backup / integrity) use so the C caller can
+/// retrieve the reason via [`obj_errmsg`].
+pub(crate) fn db_handle_error_code(db: &obj_db_t, e: &obj_engine::Error) -> obj_error_t {
+    set_db_error(db, &e.to_string());
+    error_to_code(e)
+}
+
+/// Record `e`'s specific message against the shared [`DbInner`]
+/// reached through a txn / iter Arc keepalive, and return its
+/// [`obj_error_t`] code. The keepalive-side analog of
+/// [`db_handle_error_code`] used by the txn-scoped `Err(e)` paths.
+pub(crate) fn db_error_code(inner: &DbInner, e: &obj_engine::Error) -> obj_error_t {
+    inner.set_error(&e.to_string());
+    error_to_code(e)
+}
+
+/// Static `"(no error)"` text returned by [`obj_errmsg`] when no
+/// error has been recorded on the handle.
+const NO_ERROR_MSG: &[u8] = b"(no error)\0";
+
+/// Static `"(null db handle)"` text returned by [`obj_errmsg`] when
+/// `db` is NULL.
+const NULL_DB_MSG: &[u8] = b"(null db handle)\0";
+
+/// Return the most recent error message recorded against `db`, as a
+/// NUL-terminated C string. Mirrors `sqlite3_errmsg`: where
+/// [`obj_strerror`](crate::obj_strerror) maps a code to a generic
+/// label, this returns the SPECIFIC reason the last failing call on
+/// `db` produced (e.g. `"index 'email_idx' not found"`).
+///
+/// Never returns NULL:
+/// - a NULL `db` yields a static `"(null db handle)"`;
+/// - a handle with no recorded error yields a static `"(no error)"`.
+///
+/// The returned pointer is owned by `db` and remains valid until the
+/// next libobj call that records an error on `db` (which frees the
+/// prior string) or until [`obj_close`] frees the handle. The caller
+/// MUST NOT free it.
+///
+/// # Safety
+///
+/// If non-null, `db` must be a live handle returned by
+/// [`obj_open`] / [`obj_open_with_config`] and not yet closed.
+#[no_mangle]
+pub unsafe extern "C" fn obj_errmsg(db: *mut obj_db_t) -> *const c_char {
+    catch_ffi_or(NO_ERROR_MSG.as_ptr().cast::<c_char>(), || {
+        if db.is_null() {
+            return NULL_DB_MSG.as_ptr().cast::<c_char>();
+        }
+        // SAFETY: db is non-null (checked above) and a live obj_db_t handle per the # Safety contract.
+        let stored = unsafe { (*db).inner_ref().last_error_ptr() };
+        if stored.is_null() {
+            NO_ERROR_MSG.as_ptr().cast::<c_char>()
+        } else {
+            stored
+        }
+    })
 }
 
 /// `SyncMode` selector for [`obj_config_t::sync_mode`].

@@ -73,13 +73,13 @@ use std::alloc::{alloc, dealloc, handle_alloc_error, Layout};
 use std::ffi::CStr;
 use std::sync::Arc;
 
-use obj_engine::{Db, Id, WriteTxn};
+use obj_engine::{Id, WriteTxn};
 
 use crate::error::{
-    catch_ffi, catch_ffi_void, error_to_code, obj_error_t, OBJ_ERR_INVALID_ARG, OBJ_ERR_NOT_FOUND,
-    OBJ_ERR_PANIC, OBJ_ERR_UTF8, OBJ_OK,
+    catch_ffi, catch_ffi_void, obj_error_t, OBJ_ERR_INVALID_ARG, OBJ_ERR_NOT_FOUND, OBJ_ERR_PANIC,
+    OBJ_ERR_UTF8, OBJ_OK,
 };
-use crate::lifecycle::obj_db_t;
+use crate::lifecycle::{db_error_code, obj_db_t, DbInner};
 
 /// Opaque write-transaction handle.
 ///
@@ -106,7 +106,7 @@ pub struct obj_write_txn_t {
     // allow: dead_code — `db` is never read by name; it exists purely as the keepalive that
     // outlives `inner` and is released on Drop, so the lint would otherwise fire.
     #[allow(dead_code)]
-    db: Arc<Db>,
+    db: Arc<DbInner>,
 }
 
 impl Drop for obj_write_txn_t {
@@ -127,7 +127,7 @@ pub struct obj_read_txn_t {
     /// Arc keepalive. Read via Drop ordering and via
     /// [`Self::db_arc`] when the queries module spins out an
     /// iterator whose lifetime extends past the read txn.
-    db: Arc<Db>,
+    db: Arc<DbInner>,
 }
 
 impl Drop for obj_read_txn_t {
@@ -171,7 +171,7 @@ pub unsafe extern "C" fn obj_txn_begin_write(
                 // SAFETY: out_txn is non-null (checked above) and points to a writable
                 // *mut obj_write_txn_t per the # Safety contract.
                 unsafe { *out_txn = ptr::null_mut() };
-                return error_to_code(&e);
+                return db_error_code(&db_arc, &e);
             }
         };
         // SAFETY: lifetime-only transmute erasing the env borrow to 'static; the borrowed env is
@@ -214,7 +214,7 @@ pub unsafe extern "C" fn obj_txn_commit(txn: *mut obj_write_txn_t) -> obj_error_
         let (wrapped, db) = handle.into_parts();
         let result = match wrapped.commit() {
             Ok(()) => OBJ_OK,
-            Err(e) => error_to_code(&e),
+            Err(e) => db_error_code(&db, &e),
         };
         // Release the `db` keepalive only AFTER the txn is finalized, preserving the
         // inner-before-db drop order the lifetime erasure relies on (module docs).
@@ -272,7 +272,7 @@ pub unsafe extern "C" fn obj_txn_begin_read(
                 // SAFETY: out_txn is non-null (checked above) and points to a writable
                 // *mut obj_read_txn_t per the # Safety contract.
                 unsafe { *out_txn = ptr::null_mut() };
-                return error_to_code(&e);
+                return db_error_code(&db_arc, &e);
             }
         };
         // SAFETY: lifetime-only transmute erasing the env borrow to 'static; the borrowed env is
@@ -412,7 +412,8 @@ pub unsafe extern "C" fn obj_doc_insert_indexed(
                 unsafe { *out_id = id.get() };
                 OBJ_OK
             }
-            Err(e) => error_to_code(&e),
+            // SAFETY: txn is non-null (checked above) and a live write-txn handle per the # Safety contract.
+            Err(e) => db_error_code(unsafe { (*txn).db_inner() }, &e),
         }
     })
 }
@@ -483,8 +484,13 @@ pub unsafe extern "C" fn obj_doc_update_indexed(
             &add_v,
         ) {
             Ok(()) => OBJ_OK,
-            Err(obj_engine::Error::CollectionNotFound { .. }) => OBJ_ERR_NOT_FOUND,
-            Err(e) => error_to_code(&e),
+            Err(e @ obj_engine::Error::CollectionNotFound { .. }) => {
+                // SAFETY: txn is non-null (checked above) and a live write-txn handle per the # Safety contract.
+                unsafe { (*txn).db_inner() }.set_error(&e.to_string());
+                OBJ_ERR_NOT_FOUND
+            }
+            // SAFETY: txn is non-null (checked above) and a live write-txn handle per the # Safety contract.
+            Err(e) => db_error_code(unsafe { (*txn).db_inner() }, &e),
         }
     })
 }
@@ -539,7 +545,8 @@ pub unsafe extern "C" fn obj_doc_delete_indexed(
         match txn_ref.delete_raw_indexed(collection_str, id, &remove_v) {
             Ok(true) => OBJ_OK,
             Ok(false) => OBJ_ERR_NOT_FOUND,
-            Err(e) => error_to_code(&e),
+            // SAFETY: txn is non-null (checked above) and a live write-txn handle per the # Safety contract.
+            Err(e) => db_error_code(unsafe { (*txn).db_inner() }, &e),
         }
     })
 }
@@ -714,7 +721,8 @@ pub unsafe extern "C" fn obj_doc_insert_raw(
                 unsafe { *out_id = id.get() };
                 OBJ_OK
             }
-            Err(e) => error_to_code(&e),
+            // SAFETY: txn is non-null (checked above) and a live write-txn handle per the # Safety contract.
+            Err(e) => db_error_code(unsafe { (*txn).db_inner() }, &e),
         }
     })
 }
@@ -809,7 +817,8 @@ pub unsafe extern "C" fn obj_doc_get(
                 // SAFETY: out_payload_len is non-null (top guard passed) and a writable *mut usize
                 // per the # Safety contract.
                 unsafe { *out_payload_len = 0 };
-                error_to_code(&e)
+                // SAFETY: txn is non-null (top guard passed) and a live read-txn handle per the # Safety contract.
+                db_error_code(unsafe { (*txn).db_inner() }, &e)
             }
         }
     })
@@ -862,8 +871,13 @@ pub unsafe extern "C" fn obj_doc_update_raw(
         let txn_ref = unsafe { (*txn).inner_mut() };
         match txn_ref.update_raw_bytes(collection_str, id, payload_slice) {
             Ok(()) => OBJ_OK,
-            Err(obj_engine::Error::CollectionNotFound { .. }) => OBJ_ERR_NOT_FOUND,
-            Err(e) => error_to_code(&e),
+            Err(e @ obj_engine::Error::CollectionNotFound { .. }) => {
+                // SAFETY: txn is non-null (checked above) and a live write-txn handle per the # Safety contract.
+                unsafe { (*txn).db_inner() }.set_error(&e.to_string());
+                OBJ_ERR_NOT_FOUND
+            }
+            // SAFETY: txn is non-null (checked above) and a live write-txn handle per the # Safety contract.
+            Err(e) => db_error_code(unsafe { (*txn).db_inner() }, &e),
         }
     })
 }
@@ -903,7 +917,8 @@ pub unsafe extern "C" fn obj_doc_delete_raw(
         match txn_ref.delete_raw_bytes(collection_str, id) {
             Ok(true) => OBJ_OK,
             Ok(false) => OBJ_ERR_NOT_FOUND,
-            Err(e) => error_to_code(&e),
+            // SAFETY: txn is non-null (checked above) and a live write-txn handle per the # Safety contract.
+            Err(e) => db_error_code(unsafe { (*txn).db_inner() }, &e),
         }
     })
 }
@@ -957,7 +972,8 @@ pub unsafe extern "C" fn obj_doc_upsert_raw(
         let txn_ref = unsafe { (*txn).inner_mut() };
         match txn_ref.upsert_raw_bytes(collection_str, id, payload_slice) {
             Ok(()) => OBJ_OK,
-            Err(e) => error_to_code(&e),
+            // SAFETY: txn is non-null (checked above) and a live write-txn handle per the # Safety contract.
+            Err(e) => db_error_code(unsafe { (*txn).db_inner() }, &e),
         }
     })
 }
@@ -1056,6 +1072,13 @@ impl obj_write_txn_t {
         &mut self.inner
     }
 
+    /// Borrow the shared [`DbInner`] reached through the Arc
+    /// keepalive — used to record an engine error against the
+    /// originating db handle's diagnostic slot ([`crate::obj_errmsg`]).
+    fn db_inner(&self) -> &DbInner {
+        &self.db
+    }
+
     /// Consume the boxed handle into its two owned parts — the wrapped
     /// [`WriteTxn`] and the `Db` keepalive Arc — freeing the box
     /// allocation WITHOUT running `Drop for obj_write_txn_t`.
@@ -1071,7 +1094,7 @@ impl obj_write_txn_t {
     /// The caller MUST finalize the returned `WriteTxn` (commit or drop)
     /// BEFORE releasing the returned Arc, preserving the inner-before-db
     /// drop order the `'static` lifetime erasure relies on (module docs).
-    fn into_parts(mut self: Box<Self>) -> (WriteTxn<'static>, Arc<Db>) {
+    fn into_parts(mut self: Box<Self>) -> (WriteTxn<'static>, Arc<DbInner>) {
         // SAFETY: `self` is a uniquely-owned `Box` consumed here, built by obj_txn_begin_write, so
         // `inner` has never been taken and `db` has never been read. Within the one block:
         //   - `ManuallyDrop::take` moves `inner` out exactly once (it is live, taken nowhere else);
@@ -1101,7 +1124,14 @@ impl obj_read_txn_t {
     /// Cloneable Arc handle on the parent Db. Used by the queries
     /// module to construct iterators whose lifetime extends past
     /// the read txn (the iterator owns its own snapshot).
-    pub(crate) fn db_arc(&self) -> Arc<Db> {
+    pub(crate) fn db_arc(&self) -> Arc<DbInner> {
         Arc::clone(&self.db)
+    }
+
+    /// Borrow the shared [`DbInner`] reached through the Arc
+    /// keepalive — used to record an engine error against the
+    /// originating db handle's diagnostic slot ([`crate::obj_errmsg`]).
+    pub(crate) fn db_inner(&self) -> &DbInner {
+        &self.db
     }
 }
