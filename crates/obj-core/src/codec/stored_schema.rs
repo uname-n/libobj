@@ -138,14 +138,29 @@ impl StoredSchema {
     /// first (offset 0) and rejecting any value this build does not
     /// understand.
     ///
+    /// Before postcard touches the bytes, [`ensure_schema_depth_bounded`]
+    /// pre-scans them iteratively and rejects a row whose `schema` field
+    /// nests deeper than [`MAX_SCHEMA_DEPTH`]. The serde-derive
+    /// `Deserialize` for the self-referential [`DynamicSchema`] recurses
+    /// once per nesting level on the native stack and postcard imposes no
+    /// depth limit, so an adversarial row (e.g. a long run of the `Seq`
+    /// tag byte `0x07`) would otherwise overflow the stack — an
+    /// uncatchable abort, not a recoverable error. The obj-side
+    /// [`MAX_SCHEMA_DEPTH`] guards run only *after* the tree is
+    /// materialized, so the pre-scan is what protects this step.
+    ///
     /// # Errors
     ///
+    /// - [`Error::SchemaDepthExceeded`] if the `schema` field nests
+    ///   deeper than [`MAX_SCHEMA_DEPTH`] (caught before postcard
+    ///   recurses).
     /// - [`Error::Codec`] if the bytes are not a well-formed
     ///   [`StoredSchema`].
     /// - [`Error::UnsupportedSchemaFormat`] if `format` is not
     ///   [`STORED_SCHEMA_FORMAT_V1`]. The error carries the offending
     ///   discriminator; no panic.
     pub fn from_postcard_bytes(bytes: &[u8]) -> Result<Self> {
+        ensure_schema_depth_bounded(bytes)?;
         let stored: StoredSchema = postcard::from_bytes(bytes).map_err(Error::from)?;
         if stored.format != STORED_SCHEMA_FORMAT_V1 {
             return Err(Error::UnsupportedSchemaFormat {
@@ -154,6 +169,231 @@ impl StoredSchema {
         }
         Ok(stored)
     }
+}
+
+/// A minimal forward byte cursor over a postcard row, used only by the
+/// pre-decode depth guard. Every read returns `None` on a short read so
+/// the guard can defer the precise diagnosis to postcard rather than
+/// inventing one.
+struct ByteCursor<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> ByteCursor<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0 }
+    }
+
+    /// Read one byte and advance. `None` past end of input.
+    fn read_u8(&mut self) -> Option<u8> {
+        let byte = self.bytes.get(self.pos).copied()?;
+        self.pos += 1;
+        Some(byte)
+    }
+
+    /// Decode a postcard LEB128 varint as `u64`. The loop is bounded at
+    /// the 10 bytes a `u64` needs (R2), returning `None` on a truncated
+    /// or over-long varint.
+    fn read_varint(&mut self) -> Option<u64> {
+        let mut value: u64 = 0;
+        for shift in (0..70u32).step_by(7) {
+            let byte = self.read_u8()?;
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Some(value);
+            }
+        }
+        None
+    }
+
+    /// Advance past `n` bytes. `None` if fewer than `n` remain.
+    fn skip(&mut self, n: usize) -> Option<()> {
+        let end = self.pos.checked_add(n)?;
+        if end > self.bytes.len() {
+            return None;
+        }
+        self.pos = end;
+        Some(())
+    }
+}
+
+/// Pending parse work for the iterative depth guard. The variants mirror
+/// postcard's field order so the guard tracks nesting depth exactly
+/// without itself recursing on the native stack.
+///
+/// `Copy` because every field is a small integer; the guard pops items
+/// off its work stack by value and never needs to retain the original.
+#[derive(Clone, Copy)]
+enum SchemaWork {
+    /// Parse one [`DynamicSchema`] node header at the cursor, sitting at
+    /// tree depth `depth`.
+    Node { depth: usize },
+    /// `remaining` more `(name, schema)` [`DynamicSchema::Map`] entries,
+    /// whose schemas sit at `depth`.
+    MapEntry { remaining: usize, depth: usize },
+    /// `remaining` more [`DynamicSchema::Enum`] variants
+    /// (`u32` discriminant, name, payload), whose payloads sit at
+    /// `depth`.
+    EnumVariant { remaining: usize, depth: usize },
+}
+
+/// Reject a stored-schema row whose `schema` field nests deeper than
+/// [`MAX_SCHEMA_DEPTH`] *before* postcard deserializes it.
+///
+/// Walks the postcard byte stream with an explicit work stack (never the
+/// native call stack), tracking the depth postcard's serde-derive
+/// `Deserialize` would recurse to. The guard matches the engine's own
+/// bound (`depth > MAX_SCHEMA_DEPTH`, as in [`normalize_at`]), so it
+/// never rejects a schema this build could have written. Any
+/// malformed/truncated row is left for postcard to diagnose — the guard
+/// only fails on a *proven* over-deep nesting.
+///
+/// # Errors
+///
+/// [`Error::SchemaDepthExceeded`] if the `schema` field nests deeper than
+/// [`MAX_SCHEMA_DEPTH`].
+fn ensure_schema_depth_bounded(bytes: &[u8]) -> Result<()> {
+    let mut cur = ByteCursor::new(bytes);
+    // Skip the leading `format: u8` (postcard encodes u8 as one byte at
+    // offset 0). A missing byte means a truncated row — defer to postcard.
+    if cur.read_u8().is_none() {
+        return Ok(());
+    }
+    let mut stack: Vec<SchemaWork> = vec![SchemaWork::Node { depth: 0 }];
+    // Every iteration that makes progress consumes at least one input
+    // byte, so the row length is a hard upper bound on the work (R2).
+    let max_iters = bytes.len().saturating_add(1);
+    for _ in 0..max_iters {
+        let Some(item) = stack.pop() else {
+            return Ok(());
+        };
+        if !step_schema_guard(&mut cur, item, &mut stack)? {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+/// Advance the depth guard by one work item. Returns `Ok(true)` to keep
+/// going, `Ok(false)` to stop early on a short read (deferring to
+/// postcard), or [`Error::SchemaDepthExceeded`] when the bound trips.
+fn step_schema_guard(
+    cur: &mut ByteCursor,
+    item: SchemaWork,
+    stack: &mut Vec<SchemaWork>,
+) -> Result<bool> {
+    match item {
+        SchemaWork::Node { depth } => parse_node(cur, depth, stack),
+        SchemaWork::MapEntry { remaining, depth } => {
+            // Entry = (String name, DynamicSchema). Skip the name, queue
+            // the continuation, then the node (LIFO → node first).
+            let Some(name_len) = cur.read_varint() else {
+                return Ok(false);
+            };
+            let Ok(n) = usize::try_from(name_len) else {
+                return Ok(false);
+            };
+            if cur.skip(n).is_none() {
+                return Ok(false);
+            }
+            if remaining > 1 {
+                stack.push(SchemaWork::MapEntry {
+                    remaining: remaining - 1,
+                    depth,
+                });
+            }
+            stack.push(SchemaWork::Node { depth });
+            Ok(true)
+        }
+        SchemaWork::EnumVariant { remaining, depth } => {
+            // Variant = (u32 discriminant, String name, payload node).
+            if cur.read_varint().is_none() {
+                return Ok(false);
+            }
+            let Some(name_len) = cur.read_varint() else {
+                return Ok(false);
+            };
+            let Ok(n) = usize::try_from(name_len) else {
+                return Ok(false);
+            };
+            if cur.skip(n).is_none() {
+                return Ok(false);
+            }
+            if remaining > 1 {
+                stack.push(SchemaWork::EnumVariant {
+                    remaining: remaining - 1,
+                    depth,
+                });
+            }
+            stack.push(SchemaWork::Node { depth });
+            Ok(true)
+        }
+    }
+}
+
+/// Parse one [`DynamicSchema`] node header at `depth`, queueing any
+/// children one level deeper. Returns `Ok(false)` on a short/unknown
+/// read (defer to postcard) and [`Error::SchemaDepthExceeded`] past the
+/// bound.
+fn parse_node(cur: &mut ByteCursor, depth: usize, stack: &mut Vec<SchemaWork>) -> Result<bool> {
+    if depth > MAX_SCHEMA_DEPTH {
+        return Err(Error::SchemaDepthExceeded {
+            depth: MAX_SCHEMA_DEPTH,
+        });
+    }
+    let Some(disc) = cur.read_varint() else {
+        return Ok(false);
+    };
+    let child_depth = depth + 1;
+    match disc {
+        // Null, Bool, U64, I64, F64, String, Bytes — leaf variants, no
+        // payload in the schema encoding.
+        0..=6 => Ok(true),
+        // Seq(Box<DynamicSchema>) — exactly one child, one level down.
+        7 => {
+            stack.push(SchemaWork::Node { depth: child_depth });
+            Ok(true)
+        }
+        8 => Ok(queue_collection(cur, child_depth, stack, false)),
+        9 => Ok(queue_collection(cur, child_depth, stack, true)),
+        // Unknown discriminant: let postcard report the codec error.
+        _ => Ok(false),
+    }
+}
+
+/// Read a `Map`/`Enum` length prefix and queue its `count` children at
+/// `child_depth`. `is_enum` selects the variant layout (enum entries
+/// carry a leading `u32` discriminant). Returns `false` on a short read
+/// (deferring to postcard), `true` otherwise. Never fails the depth
+/// bound itself — that is checked when each queued child node is parsed.
+fn queue_collection(
+    cur: &mut ByteCursor,
+    child_depth: usize,
+    stack: &mut Vec<SchemaWork>,
+    is_enum: bool,
+) -> bool {
+    let Some(len) = cur.read_varint() else {
+        return false;
+    };
+    let Ok(count) = usize::try_from(len) else {
+        return false;
+    };
+    if count == 0 {
+        return true;
+    }
+    stack.push(if is_enum {
+        SchemaWork::EnumVariant {
+            remaining: count,
+            depth: child_depth,
+        }
+    } else {
+        SchemaWork::MapEntry {
+            remaining: count,
+            depth: child_depth,
+        }
+    });
+    true
 }
 
 /// Normalize a live [`DynamicSchema`] into its canonical,
@@ -452,5 +692,78 @@ mod tests {
             EnumVariantSchema::new(1, "S", DynamicSchema::U64),
         ]));
         assert_eq!(normalized, expected);
+    }
+
+    /// Hand-build a postcard `StoredSchema` row whose `schema` field is
+    /// `seq_levels` nested `Seq` nodes wrapping a `Null` leaf, WITHOUT
+    /// materializing the (potentially stack-blowing) `DynamicSchema` tree
+    /// in Rust. Layout: `format` (1 byte) + `seq_levels` copies of the
+    /// `Seq` discriminant `0x07` + the leaf `Null` discriminant `0x00` +
+    /// the empty `int_signed` Vec length prefix `0x00`.
+    fn nested_seq_row(seq_levels: usize) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(seq_levels + 3);
+        bytes.push(STORED_SCHEMA_FORMAT_V1); // format: u8 at offset 0
+        bytes.extend(std::iter::repeat_n(7u8, seq_levels)); // Seq * N
+        bytes.push(0u8); // Null leaf (innermost element)
+        bytes.push(0u8); // int_signed: Vec<bool> length = 0
+        bytes
+    }
+
+    #[test]
+    fn deeply_nested_seq_row_errors_not_aborts() {
+        // ~100k levels of Seq nesting — serde-derive would recurse ~100k
+        // native stack frames and abort the process inside
+        // `postcard::from_bytes` if the pre-scan did not reject it first.
+        let bytes = nested_seq_row(100_000);
+        let err = StoredSchema::from_postcard_bytes(&bytes)
+            .expect_err("deeply nested schema must be rejected, not crash");
+        assert!(
+            matches!(err, Error::SchemaDepthExceeded { .. }),
+            "expected SchemaDepthExceeded, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn seq_row_at_max_depth_is_accepted_by_guard() {
+        // A row exactly at the bound the guard tolerates (the deepest
+        // node sits at `MAX_SCHEMA_DEPTH`) must pass the pre-scan and
+        // decode through postcard unchanged — the guard must not reject a
+        // schema this build could legitimately have written.
+        let bytes = nested_seq_row(MAX_SCHEMA_DEPTH);
+        let back = StoredSchema::from_postcard_bytes(&bytes)
+            .expect("schema at MAX_SCHEMA_DEPTH must decode");
+        // Confirm the decoded shape is the expected nested-Seq tree.
+        let mut node = &back.schema;
+        for _ in 0..MAX_SCHEMA_DEPTH {
+            match node {
+                DynamicSchema::Seq(inner) => node = inner,
+                other => panic!("expected Seq at this level, got {other:?}"),
+            }
+        }
+        assert_eq!(*node, DynamicSchema::Null);
+    }
+
+    #[test]
+    fn seq_row_one_past_max_depth_is_rejected_by_guard() {
+        // One level deeper than the guard tolerates must be rejected with
+        // a clean error (this is shallow enough that postcard would not
+        // overflow, so it isolates the guard's boundary).
+        let bytes = nested_seq_row(MAX_SCHEMA_DEPTH + 2);
+        let err = StoredSchema::from_postcard_bytes(&bytes)
+            .expect_err("past MAX_SCHEMA_DEPTH must be rejected");
+        assert!(
+            matches!(err, Error::SchemaDepthExceeded { .. }),
+            "expected SchemaDepthExceeded, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn shallow_schema_still_round_trips_through_guard() {
+        // The pre-scan must be transparent to every valid schema: a real
+        // nested (Map/Seq/Enum/scalar) schema round-trips unchanged.
+        let stored = StoredSchema::from_live(&nested_schema()).expect("from_live");
+        let bytes = stored.to_postcard_bytes().expect("encode");
+        let back = StoredSchema::from_postcard_bytes(&bytes).expect("decode");
+        assert_eq!(back, stored);
     }
 }
