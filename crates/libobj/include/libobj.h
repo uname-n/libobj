@@ -115,6 +115,16 @@ typedef int32_t obj_error_t;
  * `inclusive` selects [`Bound::Included`] vs [`Bound::Excluded`].
  * `inclusive` is ignored when `ptr` is `NULL`.
  *
+ * `inclusive` is a `u8` flag, NOT a C `_Bool`: any non-zero byte means
+ * inclusive, `0` means exclusive. It is deliberately typed `u8` rather
+ * than `bool` because this struct is passed BY VALUE across the ABI, so
+ * a C `_Bool` byte that is not exactly 0 or 1 would be undefined
+ * behaviour the moment it materialised as a Rust `bool` — before any
+ * accessor could reinterpret it. A `u8` is valid for every bit pattern,
+ * so the `!= 0` normalisation is the only possible read. Mirrors the
+ * reasoning behind the `obj_config_t` bool-field reads in
+ * `crates/libobj/src/lifecycle.rs`.
+ *
  * cbindgen emits this as `obj_bound_t` in the generated header.
  */
 typedef struct {
@@ -127,9 +137,10 @@ typedef struct {
    */
   uintptr_t len;
   /**
-   * `true` → `Bound::Included`; `false` → `Bound::Excluded`.
+   * Non-zero → `Bound::Included`; `0` → `Bound::Excluded`. Typed `u8`
+   * (not `bool`) so any C-supplied byte is a valid value, never UB.
    */
-  bool inclusive;
+  uint8_t inclusive;
 } obj_bound_t;
 
 /**

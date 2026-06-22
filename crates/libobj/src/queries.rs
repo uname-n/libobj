@@ -28,6 +28,16 @@ use crate::txn::obj_read_txn_t;
 /// `inclusive` selects [`Bound::Included`] vs [`Bound::Excluded`].
 /// `inclusive` is ignored when `ptr` is `NULL`.
 ///
+/// `inclusive` is a `u8` flag, NOT a C `_Bool`: any non-zero byte means
+/// inclusive, `0` means exclusive. It is deliberately typed `u8` rather
+/// than `bool` because this struct is passed BY VALUE across the ABI, so
+/// a C `_Bool` byte that is not exactly 0 or 1 would be undefined
+/// behaviour the moment it materialised as a Rust `bool` — before any
+/// accessor could reinterpret it. A `u8` is valid for every bit pattern,
+/// so the `!= 0` normalisation is the only possible read. Mirrors the
+/// reasoning behind the `obj_config_t` bool-field reads in
+/// `crates/libobj/src/lifecycle.rs`.
+///
 /// cbindgen emits this as `obj_bound_t` in the generated header.
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -36,8 +46,9 @@ pub struct ObjBound {
     pub ptr: *const u8,
     /// Length of the key in bytes. Must be `0` when `ptr` is `NULL`.
     pub len: usize,
-    /// `true` → `Bound::Included`; `false` → `Bound::Excluded`.
-    pub inclusive: bool,
+    /// Non-zero → `Bound::Included`; `0` → `Bound::Excluded`. Typed `u8`
+    /// (not `bool`) so any C-supplied byte is a valid value, never UB.
+    pub inclusive: u8,
 }
 
 /// Iterator concrete variants. No `dyn` — the C side sees
@@ -500,12 +511,14 @@ pub unsafe extern "C" fn obj_count_index_range(
             Err(code) => return code,
         };
         // SAFETY: lower.ptr is either NULL (treated as unbounded) or points to lower.len readable bytes per the # Safety contract.
-        let lower_bound = match unsafe { bytes_to_bound(lower.ptr, lower.len, lower.inclusive) } {
+        let lower_bound = match unsafe { bytes_to_bound(lower.ptr, lower.len, lower.inclusive != 0) }
+        {
             Ok(b) => b,
             Err(code) => return code,
         };
         // SAFETY: upper.ptr is either NULL (treated as unbounded) or points to upper.len readable bytes per the # Safety contract.
-        let upper_bound = match unsafe { bytes_to_bound(upper.ptr, upper.len, upper.inclusive) } {
+        let upper_bound = match unsafe { bytes_to_bound(upper.ptr, upper.len, upper.inclusive != 0) }
+        {
             Ok(b) => b,
             Err(code) => return code,
         };
@@ -798,9 +811,9 @@ unsafe fn bytes_to_bound(
 /// As [`bytes_to_bound`] applied to each bound.
 unsafe fn decode_bound_pair(lower: ObjBound, upper: ObjBound) -> Result<BoundPair, obj_error_t> {
     // SAFETY: lower.ptr is either NULL (treated as unbounded) or points to lower.len readable bytes per the # Safety contract.
-    let lower_bound = unsafe { bytes_to_bound(lower.ptr, lower.len, lower.inclusive) }?;
+    let lower_bound = unsafe { bytes_to_bound(lower.ptr, lower.len, lower.inclusive != 0) }?;
     // SAFETY: upper.ptr is either NULL (treated as unbounded) or points to upper.len readable bytes per the # Safety contract.
-    let upper_bound = unsafe { bytes_to_bound(upper.ptr, upper.len, upper.inclusive) }?;
+    let upper_bound = unsafe { bytes_to_bound(upper.ptr, upper.len, upper.inclusive != 0) }?;
     Ok((lower_bound, upper_bound))
 }
 

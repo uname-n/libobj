@@ -514,8 +514,8 @@ fn index_range_ids(
             rtxn,
             cs_collection.as_ptr(),
             cs_index.as_ptr(),
-            ObjBound { ptr: key.as_ptr(), len: key.len(), inclusive: true },
-            ObjBound { ptr: key.as_ptr(), len: key.len(), inclusive: true },
+            ObjBound { ptr: key.as_ptr(), len: key.len(), inclusive: 1 },
+            ObjBound { ptr: key.as_ptr(), len: key.len(), inclusive: 1 },
             &raw mut iter,
         )
     };
