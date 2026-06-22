@@ -779,6 +779,14 @@ obj_error_t obj_find_unique(obj_read_txn_t *txn,
  * most `value_len + 5` bytes, so `value_len + 5` is always a safe
  * up-front capacity.)
  *
+ * On a value/kind validation failure (an unknown `kind`, a fixed-
+ * width `value_len` mismatch, non-UTF-8 `STRING` bytes, or an
+ * embedded NUL the encoding rejects) the call writes `*out_len = 0`
+ * and returns the error code WITHOUT touching `out`. `*out_len` is
+ * therefore always written whenever `out_len` is non-null: the
+ * encoded (or required) length on `OBJ_OK` and the too-small path,
+ * and `0` on a validation failure.
+ *
  * # Safety
  *
  * - `value` may be NULL IFF `value_len == 0`; otherwise it must

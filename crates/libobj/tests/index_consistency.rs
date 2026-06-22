@@ -540,3 +540,68 @@ fn index_range_ids(
     unsafe { obj_iter_free(iter) };
     ids
 }
+
+/// Issue #16 fix #1: on a value/kind validation failure
+/// `obj_index_key_encode` writes `*out_len = 0` (rather than leaving
+/// it untouched) and returns the error code without touching `out`.
+mod encode_validation_out_len {
+    use super::{obj_index_key_encode, OBJ_ERR_INVALID_ARG, OBJ_INDEX_VALUE_STRING, OBJ_INDEX_VALUE_U64};
+    use obj::{OBJ_ERR_UTF8, OBJ_INDEX_VALUE_BOOL};
+
+    /// Call the encoder into a generously-sized buffer pre-seeded with
+    /// a sentinel `out_len`, returning `(code, out_len)`.
+    fn encode(kind: i32, value: &[u8]) -> (i32, usize) {
+        let mut out = [0u8; 64];
+        let mut out_len: usize = 0xDEAD_BEEF;
+        let code = unsafe {
+            obj_index_key_encode(
+                kind,
+                value.as_ptr(),
+                value.len(),
+                out.as_mut_ptr(),
+                out.len(),
+                &raw mut out_len,
+            )
+        };
+        (code, out_len)
+    }
+
+    #[test]
+    fn unknown_kind_zeroes_out_len() {
+        let (code, out_len) = encode(9999, b"x");
+        assert_eq!(code, OBJ_ERR_INVALID_ARG);
+        assert_eq!(out_len, 0, "validation failure must write *out_len = 0");
+    }
+
+    #[test]
+    fn fixed_width_mismatch_zeroes_out_len() {
+        // U64 demands exactly 8 bytes; 3 bytes is a width mismatch.
+        let (code, out_len) = encode(OBJ_INDEX_VALUE_U64, b"abc");
+        assert_eq!(code, OBJ_ERR_INVALID_ARG);
+        assert_eq!(out_len, 0, "width mismatch must write *out_len = 0");
+    }
+
+    #[test]
+    fn bool_width_mismatch_zeroes_out_len() {
+        // BOOL demands exactly 1 byte.
+        let (code, out_len) = encode(OBJ_INDEX_VALUE_BOOL, b"too long");
+        assert_eq!(code, OBJ_ERR_INVALID_ARG);
+        assert_eq!(out_len, 0, "bool width mismatch must write *out_len = 0");
+    }
+
+    #[test]
+    fn non_utf8_string_zeroes_out_len() {
+        // 0xFF is never valid UTF-8.
+        let (code, out_len) = encode(OBJ_INDEX_VALUE_STRING, &[0xFF]);
+        assert_eq!(code, OBJ_ERR_UTF8);
+        assert_eq!(out_len, 0, "non-UTF-8 string must write *out_len = 0");
+    }
+
+    #[test]
+    fn embedded_nul_string_zeroes_out_len() {
+        // The order-preserving string encoding rejects an embedded NUL.
+        let (code, out_len) = encode(OBJ_INDEX_VALUE_STRING, b"a\0b");
+        assert_ne!(code, super::OBJ_OK, "embedded NUL must be rejected");
+        assert_eq!(out_len, 0, "embedded NUL must write *out_len = 0");
+    }
+}
