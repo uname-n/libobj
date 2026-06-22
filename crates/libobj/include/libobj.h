@@ -48,9 +48,11 @@
  * Opaque database handle.
  *
  * Created by [`obj_open`] / [`obj_open_with_config`]; freed by
- * [`obj_close`]. The Rust side holds an [`Arc<obj_engine::Db>`] so
- * future transaction handles can each hold an
- * `Arc` to outlive the original [`obj_open`] return point.
+ * [`obj_close`]. The Rust side holds an [`Arc<DbInner>`] (the
+ * engine handle plus a `last_error` diagnostic slot) so future
+ * transaction handles can each hold an `Arc` to outlive the
+ * original [`obj_open`] return point AND reach the shared
+ * `last_error` slot for [`obj_errmsg`].
  *
  * The struct is **opaque to C**: cbindgen emits a forward
  * declaration only (`typedef struct obj_db_t obj_db_t;`). The
@@ -695,6 +697,29 @@ obj_error_t obj_doc_upsert_raw(obj_write_txn_t *txn,
                                uint64_t id,
                                const uint8_t *payload,
                                uintptr_t payload_len);
+
+/**
+ * Return the most recent error message recorded against `db`, as a
+ * NUL-terminated C string. Mirrors `sqlite3_errmsg`: where
+ * [`obj_strerror`](crate::obj_strerror) maps a code to a generic
+ * label, this returns the SPECIFIC reason the last failing call on
+ * `db` produced (e.g. `"index 'email_idx' not found"`).
+ *
+ * Never returns NULL:
+ * - a NULL `db` yields a static `"(null db handle)"`;
+ * - a handle with no recorded error yields a static `"(no error)"`.
+ *
+ * The returned pointer is owned by `db` and remains valid until the
+ * next libobj call that records an error on `db` (which frees the
+ * prior string) or until [`obj_close`] frees the handle. The caller
+ * MUST NOT free it.
+ *
+ * # Safety
+ *
+ * If non-null, `db` must be a live handle returned by
+ * [`obj_open`] / [`obj_open_with_config`] and not yet closed.
+ */
+ const char *obj_errmsg(obj_db_t *db);
 
 /**
  * Look up a single doc by index key on a `Unique` index. The

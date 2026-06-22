@@ -56,8 +56,8 @@ pub use error::{
     OBJ_ERR_UTF8, OBJ_OK,
 };
 pub use lifecycle::{
-    obj_close, obj_config_t, obj_db_t, obj_index_key_encode, obj_index_value_kind_t, obj_open,
-    obj_open_with_config, obj_sync_mode_t, OBJ_ENCRYPTION_KEY_LEN, OBJ_INDEX_VALUE_BOOL,
+    obj_close, obj_config_t, obj_db_t, obj_errmsg, obj_index_key_encode, obj_index_value_kind_t,
+    obj_open, obj_open_with_config, obj_sync_mode_t, OBJ_ENCRYPTION_KEY_LEN, OBJ_INDEX_VALUE_BOOL,
     OBJ_INDEX_VALUE_BYTES, OBJ_INDEX_VALUE_F64, OBJ_INDEX_VALUE_I64, OBJ_INDEX_VALUE_STRING,
     OBJ_INDEX_VALUE_U64, OBJ_SYNC_MODE_FULL, OBJ_SYNC_MODE_NORMAL, OBJ_SYNC_MODE_OFF,
 };

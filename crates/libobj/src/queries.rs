@@ -14,13 +14,11 @@ use std::ops::Bound;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use obj_engine::Db;
-
 use crate::error::{
-    catch_ffi, catch_ffi_or, catch_ffi_void, error_to_code, obj_error_t, OBJ_ERR_INTEGRITY,
-    OBJ_ERR_INVALID_ARG, OBJ_ERR_NOT_FOUND, OBJ_ERR_PANIC, OBJ_ERR_UTF8, OBJ_OK,
+    catch_ffi, catch_ffi_or, catch_ffi_void, obj_error_t, OBJ_ERR_INTEGRITY, OBJ_ERR_INVALID_ARG,
+    OBJ_ERR_NOT_FOUND, OBJ_ERR_PANIC, OBJ_ERR_UTF8, OBJ_OK,
 };
-use crate::lifecycle::obj_db_t;
+use crate::lifecycle::{db_error_code, db_handle_error_code, obj_db_t, DbInner};
 use crate::txn::obj_read_txn_t;
 
 /// A range bound passed by value across the C ABI.
@@ -55,7 +53,7 @@ enum IterImpl {
         /// the C iterator handle's lifetime.
         // allow: dead_code — held purely to pin the parent Db's lifetime; never read in normal control flow, only released on drop.
         #[allow(dead_code)]
-        db: Arc<Db>,
+        db: Arc<DbInner>,
     },
     /// `obj_iter_index_range` — pre-materialised pairs.
     IndexRange {
@@ -67,7 +65,7 @@ enum IterImpl {
         /// snapshot pinned in case future variants stream lazily.
         // allow: dead_code — held purely to pin the parent Db's snapshot; never read in normal control flow, only released on drop.
         #[allow(dead_code)]
-        db: Arc<Db>,
+        db: Arc<DbInner>,
     },
 }
 
@@ -168,7 +166,7 @@ pub unsafe extern "C" fn obj_iter_all(
             Err(e) => {
                 // SAFETY: out_iter is non-null (checked above) and writable per the # Safety contract.
                 unsafe { *out_iter = ptr::null_mut() };
-                return error_to_code(&e);
+                return db_error_code(&db_arc, &e);
             }
         };
         let pending: VecDeque<(u64, Vec<u8>)> =
@@ -266,7 +264,7 @@ unsafe fn iter_index_range_inner(
         Err(e) => {
             // SAFETY: out_iter is non-null (checked above) and writable per the # Safety contract.
             unsafe { *out_iter = ptr::null_mut() };
-            return error_to_code(&e);
+            return db_error_code(&db_arc, &e);
         }
     };
     let pending: VecDeque<(u64, Vec<u8>)> =
@@ -430,7 +428,8 @@ pub unsafe extern "C" fn obj_find_unique(
             }
             Err(e) => {
                 clear_payload_outs(out_id, out_payload, out_payload_len);
-                error_to_code(&e)
+                // SAFETY: txn is non-null (checked above) and a live read-txn handle per the # Safety contract.
+                db_error_code(unsafe { (*txn).db_inner() }, &e)
             }
         }
     })
@@ -465,7 +464,8 @@ pub unsafe extern "C" fn obj_count_all(
                 unsafe { *out_count = n };
                 OBJ_OK
             }
-            Err(e) => error_to_code(&e),
+            // SAFETY: txn is non-null (checked above) and a live read-txn handle per the # Safety contract.
+            Err(e) => db_error_code(unsafe { (*txn).db_inner() }, &e),
         }
     })
 }
@@ -517,7 +517,8 @@ pub unsafe extern "C" fn obj_count_index_range(
                 unsafe { *out_count = n };
                 OBJ_OK
             }
-            Err(e) => error_to_code(&e),
+            // SAFETY: txn is non-null (checked above) and a live read-txn handle per the # Safety contract.
+            Err(e) => db_error_code(unsafe { (*txn).db_inner() }, &e),
         }
     })
 }
@@ -571,7 +572,8 @@ pub unsafe extern "C" fn obj_integrity_check(
             Err(e) => {
                 // SAFETY: out_report is non-null (checked above) and writable per the # Safety contract.
                 unsafe { *out_report = ptr::null_mut() };
-                error_to_code(&e)
+                // SAFETY: db is non-null (checked above) and a live db handle per the # Safety contract.
+                db_handle_error_code(unsafe { &*db }, &e)
             }
         }
     })
@@ -713,7 +715,8 @@ pub unsafe extern "C" fn obj_backup_to(db: *mut obj_db_t, dest: *const c_char) -
         let db_arc = unsafe { (*db).db_arc() };
         match db_arc.backup_to(&dest_path) {
             Ok(()) => OBJ_OK,
-            Err(e) => error_to_code(&e),
+            // SAFETY: db is non-null (checked above) and a live db handle per the # Safety contract.
+            Err(e) => db_handle_error_code(unsafe { &*db }, &e),
         }
     })
 }
@@ -735,7 +738,8 @@ pub unsafe extern "C" fn obj_stat(db: *mut obj_db_t, out_stat: *mut obj_stat_t) 
         let db_arc = unsafe { (*db).db_arc() };
         let stat = match db_arc.stat() {
             Ok(s) => s,
-            Err(e) => return error_to_code(&e),
+            // SAFETY: db is non-null (checked above) and a live db handle per the # Safety contract.
+            Err(e) => return db_handle_error_code(unsafe { &*db }, &e),
         };
         let collection_count = u64::try_from(stat.collections.len()).unwrap_or(u64::MAX);
         let out = obj_stat_t {
