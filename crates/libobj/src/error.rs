@@ -198,6 +198,7 @@ pub(crate) fn error_to_code(err: &obj_engine::Error) -> obj_error_t {
         | Error::SchemaVersionFromFuture { .. }
         | Error::SchemaNotRegistered { .. }
         | Error::BackupNotSupportedForMemoryPager
+        | Error::BackupNotSupportedForEncryptedPager
         | Error::FormatFeatureUnsupported { .. }
         | Error::AttachedDatabaseIsReadOnly { .. } => OBJ_ERR_UNSUPPORTED,
         Error::BackupDestinationExists { .. }

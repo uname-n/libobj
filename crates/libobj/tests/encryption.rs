@@ -24,10 +24,10 @@ use std::ptr;
 use tempfile::TempDir;
 
 use obj::{
-    obj_buf_free, obj_close, obj_config_t, obj_db_t, obj_doc_get, obj_doc_insert_raw, obj_open,
-    obj_open_with_config, obj_read_txn_t, obj_txn_begin_read, obj_txn_begin_write, obj_txn_commit,
-    obj_txn_end_read, obj_write_txn_t, OBJ_ENCRYPTION_KEY_LEN, OBJ_ERR_CORRUPTION,
-    OBJ_ERR_UNSUPPORTED, OBJ_OK, OBJ_SYNC_MODE_FULL,
+    obj_backup_to, obj_buf_free, obj_close, obj_config_t, obj_db_t, obj_doc_get,
+    obj_doc_insert_raw, obj_open, obj_open_with_config, obj_read_txn_t, obj_txn_begin_read,
+    obj_txn_begin_write, obj_txn_commit, obj_txn_end_read, obj_write_txn_t, OBJ_ENCRYPTION_KEY_LEN,
+    OBJ_ERR_CORRUPTION, OBJ_ERR_UNSUPPORTED, OBJ_OK, OBJ_SYNC_MODE_FULL,
 };
 
 fn path_cstring(p: &Path) -> CString {
@@ -186,6 +186,39 @@ fn wrong_key_cannot_read_encrypted_data_via_c_abi() {
     );
     assert!(out_payload.is_null());
     unsafe { obj_txn_end_read(rtxn) };
+    unsafe { obj_close(db) };
+}
+
+#[test]
+fn backup_on_encrypted_db_returns_unsupported() {
+    // obj-core refuses hot backups of an encrypted pager
+    // (`Error::BackupNotSupportedForEncryptedPager`). That refusal must
+    // surface through `error_to_code` as `OBJ_ERR_UNSUPPORTED` — the same
+    // code its sibling memory-pager refusal maps to — rather than the
+    // fail-closed `OBJ_ERR_CORRUPTION` wildcard, which would tell the
+    // caller a healthy encrypted database is corrupt.
+    let dir = TempDir::new().expect("tmp");
+    let path = dir.path().join("enc-backup.obj");
+
+    let (code, db) = open_with_key(&path, Some(key_a()));
+    assert_eq!(code, OBJ_OK, "encrypted create returned {code}");
+    assert!(!db.is_null());
+    let txn = begin_write(db);
+    let _ = insert(txn, "secrets", b"payload");
+    let code = unsafe { obj_txn_commit(txn) };
+    assert_eq!(code, OBJ_OK);
+
+    // Destination must not already exist so the encrypted-pager refusal
+    // is what fails the call, not a pre-existing-destination error.
+    let dst_dir = TempDir::new().expect("tmp dst dir");
+    let dst = dst_dir.path().join("backup.obj");
+    let dst_cs = path_cstring(&dst);
+    let code = unsafe { obj_backup_to(db, dst_cs.as_ptr()) };
+    assert_eq!(
+        code, OBJ_ERR_UNSUPPORTED,
+        "backup of an encrypted db should map to OBJ_ERR_UNSUPPORTED, got {code}"
+    );
+
     unsafe { obj_close(db) };
 }
 
