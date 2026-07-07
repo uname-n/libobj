@@ -1109,6 +1109,14 @@ impl Db {
     /// [`Db::read_transaction`] and dispatches against the
     /// runtime-named collection's catalog row.
     ///
+    /// A `name` with an **empty namespace segment** — one that begins
+    /// with `.` (e.g. `".orders"`, or the degenerate `"."`) — is
+    /// malformed: it can never match a registered attachment, so the
+    /// first method call on the handle surfaces
+    /// [`Error::InvalidArgument`] rather than an opaque
+    /// unknown-namespace error. A trailing dot (`"ns."`) is not
+    /// malformed — its namespace (`"ns"`) is non-empty.
+    ///
     /// # Read-only
     ///
     /// The returned handle rejects every mutating call —
@@ -1673,6 +1681,28 @@ pub(crate) fn split_namespace(name: &str) -> (Option<&str>, &str) {
     }
 }
 
+/// Checked variant of [`split_namespace`]: rejects a name whose
+/// namespace segment is empty (i.e. a leading `.`, such as `".orders"`
+/// or the degenerate `"."`). Such a name can never match a registered
+/// attachment, so surfacing it as a clear [`Error::InvalidArgument`]
+/// here beats the opaque `CollectionNamespaceUnknown { namespace: "" }`
+/// it would otherwise trip at first use.
+///
+/// A trailing-dot name (`"ns."`) is NOT rejected: its namespace
+/// segment (`"ns"`) is non-empty; only the *tail* is empty, which is a
+/// distinct (and here permissible) shape. Every namespace-resolving
+/// call site in obj-rs funnels through this helper so the diagnostic is
+/// identical across the `collection`, `inspect`, and `txn` paths.
+pub(crate) fn try_split_namespace(name: &str) -> Result<(Option<&str>, &str)> {
+    let (namespace, tail) = split_namespace(name);
+    if matches!(namespace, Some("")) {
+        return Err(Error::InvalidArgument(
+            "collection name has an empty namespace segment",
+        ));
+    }
+    Ok((namespace, tail))
+}
+
 /// `Db` is `Send + Sync` so it composes with `Arc<Db>` for
 /// concurrent reader / single-writer workloads.  The thread-safety
 /// is inherited from the underlying `Arc<TxnEnv>` + `Arc<Mutex<Catalog>>`.
@@ -1755,5 +1785,42 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, obj_core::Error::InvalidArgument("abort")));
         assert!(!db.catalog_poisoned.load(Ordering::SeqCst));
+    }
+
+    // A name with an empty namespace segment — one beginning with a
+    // `.` — is malformed: `try_split_namespace` rejects it up front
+    // with `InvalidArgument` rather than yielding a `Some("")`
+    // namespace that could only ever fail as an opaque
+    // `CollectionNamespaceUnknown { namespace: "" }` at first use.
+    #[test]
+    fn try_split_namespace_rejects_empty_namespace_segment() {
+        for name in [".orders", "."] {
+            let err = super::try_split_namespace(name)
+                .expect_err("empty namespace segment must be rejected");
+            assert!(
+                matches!(err, obj_core::Error::InvalidArgument(_)),
+                "expected InvalidArgument for {name:?}; got {err:?}",
+            );
+        }
+    }
+
+    // Well-formed names are unaffected: a real namespace splits into
+    // `(Some(ns), tail)` and a bare name into `(None, name)` — no
+    // error, identical to the infallible `split_namespace`. A trailing
+    // dot (`"ns."`) keeps a non-empty namespace and so is permitted.
+    #[test]
+    fn try_split_namespace_passes_well_formed_names() {
+        assert_eq!(
+            super::try_split_namespace("ns.orders").unwrap(),
+            (Some("ns"), "orders"),
+        );
+        assert_eq!(
+            super::try_split_namespace("orders").unwrap(),
+            (None, "orders"),
+        );
+        assert_eq!(
+            super::try_split_namespace("ns.").unwrap(),
+            (Some("ns"), ""),
+        );
     }
 }

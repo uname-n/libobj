@@ -228,7 +228,7 @@ impl<'tx, T: Document> Collection<'tx, T> {
         tx: &'tx ReadTxn<'_>,
         name: Cow<'static, str>,
     ) -> Result<Self> {
-        let (namespace, tail) = crate::db::split_namespace(&name);
+        let (namespace, tail) = crate::db::try_split_namespace(&name)?;
         let (env, snapshot, lookup_name): (
             &'tx obj_core::TxnEnv<FileHandle>,
             &'tx obj_core::ReaderSnapshot<FileHandle>,
@@ -1619,7 +1619,7 @@ fn read_descriptor_via_snapshot_named(
 /// (`<ns>.<tail>`) fall back to the handle path so the attached-snapshot
 /// dispatch is unchanged.
 pub(crate) fn fused_point_get<T: Document>(tx: &ReadTxn<'_>, id: Id) -> Result<Option<T>> {
-    let (namespace, _tail) = crate::db::split_namespace(T::COLLECTION);
+    let (namespace, _tail) = crate::db::try_split_namespace(T::COLLECTION)?;
     if namespace.is_some() {
         return Collection::<T>::open_readonly(tx)?.get(id);
     }
