@@ -144,7 +144,7 @@ impl<'db> WriteTxn<'db> {
     /// - [`Error::Busy`] if the pager / catalog mutex is poisoned.
     /// - Any error the pager / B-tree / postcard codec returns.
     pub fn collection<T: Document>(&mut self) -> Result<Collection<'_, T>> {
-        if let (Some(namespace), tail) = crate::db::split_namespace(T::COLLECTION) {
+        if let (Some(namespace), tail) = crate::db::try_split_namespace(T::COLLECTION)? {
             return Err(Error::AttachedDatabaseIsReadOnly {
                 namespace: namespace.to_owned(),
                 collection: tail.to_owned(),
@@ -910,7 +910,7 @@ impl<'db> ReadTxn<'db> {
     /// - [`Error::CollectionNamespaceUnknown`] if `collection`
     ///   carries a namespace prefix that is not attached.
     fn resolve_read_target<'a>(&'a self, collection: &'a str) -> Result<ReadTarget<'a>> {
-        let (namespace, tail) = crate::db::split_namespace(collection);
+        let (namespace, tail) = crate::db::try_split_namespace(collection)?;
         match namespace {
             None => Ok(ReadTarget {
                 env: self.inner.env(),
@@ -1438,7 +1438,7 @@ pub(crate) fn lock_catalog(
 /// Reject a write against a namespaced collection. Attached
 /// databases are read-only through the calling Db.
 fn reject_namespaced_write(collection: &str) -> Result<()> {
-    if let (Some(namespace), tail) = crate::db::split_namespace(collection) {
+    if let (Some(namespace), tail) = crate::db::try_split_namespace(collection)? {
         return Err(Error::AttachedDatabaseIsReadOnly {
             namespace: namespace.to_owned(),
             collection: tail.to_owned(),

@@ -224,7 +224,7 @@ impl Db {
         txn: &ReadTxn<'_>,
         collection: &str,
     ) -> Result<(CollectionDescriptor, Option<AttachedReadCtx>)> {
-        let (namespace, tail) = crate::db::split_namespace(collection);
+        let (namespace, tail) = crate::db::try_split_namespace(collection)?;
         let Some(ns) = namespace else {
             let pager = self.env.pager().lock().map_err(|_| Error::Busy {
                 kind: obj_core::LockKind::WriterInProcess,

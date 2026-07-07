@@ -311,6 +311,29 @@ fn db_collection_unknown_namespace_errors_at_call_site() {
     );
 }
 
+/// `Db::collection::<T>(name)` with an **empty namespace segment**
+/// (a leading dot, e.g. `".orders"`, and the degenerate `"."`)
+/// surfaces `Error::InvalidArgument` at the first method call — a
+/// clear malformed-name signal rather than the opaque
+/// `CollectionNamespaceUnknown { namespace: "" }` it used to trip.
+#[test]
+fn db_collection_empty_namespace_segment_errors_at_call_site() {
+    let dir = TempDir::new().expect("tmp");
+    let main_path = dir.path().join("main.obj");
+    let main_db = Db::open(&main_path).expect("open main");
+
+    for name in [".orders", "."] {
+        let err = main_db
+            .collection::<Order>(name)
+            .all()
+            .expect_err("empty namespace segment must be rejected");
+        assert!(
+            matches!(err, Error::InvalidArgument(_)),
+            "expected InvalidArgument for name {name:?}; got {err:?}",
+        );
+    }
+}
+
 /// `Db::collection::<T>(name)` reads from a runtime-named
 /// collection on the **calling** Db (no namespace prefix). Useful
 /// when the type's declared `COLLECTION` differs from the name the
