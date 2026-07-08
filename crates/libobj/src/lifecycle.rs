@@ -711,9 +711,11 @@ pub const OBJ_INDEX_VALUE_BYTES: obj_index_value_kind_t = 5;
 /// width `value_len` mismatch, non-UTF-8 `STRING` bytes, or an
 /// embedded NUL the encoding rejects) the call writes `*out_len = 0`
 /// and returns the error code WITHOUT touching `out`. `*out_len` is
-/// therefore always written whenever `out_len` is non-null: the
-/// encoded (or required) length on `OBJ_OK` and the too-small path,
-/// and `0` on a validation failure.
+/// written on `OBJ_OK`, the too-small path, and value/kind validation
+/// failures: the encoded (or required) length on `OBJ_OK` and the
+/// too-small path, and `0` on a validation failure. It is left
+/// untouched only by the initial NULL-pointer argument checks, which
+/// return [`OBJ_ERR_INVALID_ARG`] before `*out_len` is written.
 ///
 /// # Safety
 ///

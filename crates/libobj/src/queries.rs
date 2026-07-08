@@ -709,6 +709,9 @@ pub unsafe extern "C" fn obj_integrity_report_free(report: *mut obj_integrity_re
 /// Take a hot backup of `db` to `dest`. The destination MUST NOT
 /// already exist.
 ///
+/// Returns [`OBJ_ERR_UNSUPPORTED`] for a database that cannot be hot-
+/// backed up — an in-memory pager or an encrypted pager.
+///
 /// # Safety
 ///
 /// - `db` must be a live db handle.

@@ -61,9 +61,9 @@ pub const OBJ_ERR_NOT_FOUND: obj_error_t = 5;
 pub const OBJ_ERR_INTEGRITY: obj_error_t = 6;
 
 /// Operation is not supported in this build / for this database
-/// (e.g. `obj_backup_to` on an in-memory database, an attempt to
-/// mutate an attached read-only attachment, an unimplemented
-/// schema migration).
+/// (e.g. `obj_backup_to` on an in-memory database, backing up an
+/// encrypted database, an attempt to mutate an attached read-only
+/// attachment, an unimplemented schema migration).
 pub const OBJ_ERR_UNSUPPORTED: obj_error_t = 7;
 
 /// A C string handed across the FFI boundary was not valid UTF-8.
