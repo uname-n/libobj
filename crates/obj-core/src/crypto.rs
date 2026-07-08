@@ -94,7 +94,7 @@ pub fn derive_page_key(
 /// A fresh 24-byte nonce is drawn from the injected `entropy` source
 /// on every call, so callers do not need to track a nonce counter.
 /// Production passes
-/// [`OsEntropy`] (OS CSPRNG); the DST
+/// [`OsEntropy`](crate::platform::OsEntropy) (OS CSPRNG); the DST
 /// harness passes a seeded source for reproducible nonces.
 ///
 /// `page_id` is bound to the ciphertext via the AEAD's associated
