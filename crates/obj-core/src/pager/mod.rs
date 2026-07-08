@@ -34,6 +34,7 @@ use crate::pager::header::{
     decode_header, encode_header, FileHeader, FEATURE_FLAG_COMPRESSION, FEATURE_FLAG_ENCRYPTION,
 };
 use crate::pager::page::{Page, PageId, ENCRYPTION_OVERHEAD, PAGE_SIZE, PAGE_TRAILER_SIZE};
+use crate::platform::env::{Entropy, OsEntropy};
 use crate::platform::{FileBackend, FileHandle, SyncMode};
 use crate::wal::{Lsn, Wal, WalConfig};
 
@@ -702,6 +703,19 @@ pub struct Pager<F: FileBackend = FileHandle> {
     /// guaranteed to physically exist. Seeded at `open` from the real
     /// file length via [`Self::main_pages_for_len`].
     main_high_water: u64,
+    /// Injected entropy source for the KDF salt (at file creation) and,
+    /// on encryption builds, each page's AEAD nonce. `Arc<dyn Entropy>`
+    /// so the DST harness can substitute a seeded, reproducible source;
+    /// production carries [`OsEntropy`]. Deliberately NOT part of
+    /// [`Config`] — that type is `Copy + Serialize` on no-encryption
+    /// builds and an `Arc<dyn>` would break both — so it is threaded as
+    /// a constructor parameter instead. Cold path — untouched on reads.
+    // allow: read only on the encryption build (page-nonce generation in
+    // `encrypt_logical`). On a no-encryption build the value is still
+    // threaded through to the WAL for salt generation, but this Pager
+    // field itself is write-only, so it looks dead there.
+    #[allow(dead_code)]
+    entropy: Arc<dyn Entropy>,
 }
 
 /// Newtype wrapper around the derived 32-byte
@@ -830,11 +844,31 @@ impl Pager<FileHandle> {
     ///   look like an obj database, or if an existing WAL has a
     ///   header that disagrees with the main file's format.
     pub fn open<P: AsRef<Path>>(path: P, config: Config) -> Result<Self> {
+        Self::open_with_env(path, config, Arc::new(OsEntropy))
+    }
+
+    /// Open or create a database file at `path`, drawing every salt
+    /// and nonce from the caller-supplied `entropy` source rather than
+    /// the OS default. This is the deterministic-simulation-testing
+    /// (DST) entry point: passing a
+    /// [`SeededEntropy`](crate::platform::SeededEntropy) makes two
+    /// runs of the same seed produce byte-identical on-disk salts and
+    /// nonces. [`Pager::open`] is the production convenience that
+    /// defaults `entropy` to [`OsEntropy`].
+    ///
+    /// # Errors
+    ///
+    /// Identical to [`Pager::open`].
+    pub fn open_with_env<P: AsRef<Path>>(
+        path: P,
+        config: Config,
+        entropy: Arc<dyn Entropy>,
+    ) -> Result<Self> {
         let main_path = path.as_ref().to_path_buf();
         let main = FileHandle::open_or_create(&main_path)?;
         let wal_path = wal_path_for(&main_path);
         let wal = FileHandle::open_or_create(&wal_path)?;
-        Self::open_with_backends(main, wal, wal_path, config)
+        Self::open_with_backends(main, wal, wal_path, config, entropy)
     }
 
     /// Construct a fresh in-memory pager. Cache capacity is taken from
@@ -852,7 +886,9 @@ impl Pager<FileHandle> {
         }
         refuse_compression_without_feature(config.compression_mode)?;
         refuse_encryption_without_feature(config.encryption_key.is_some())?;
-        let header = build_new_file_header(config.compression_mode, config.master_key())?;
+        let entropy: Arc<dyn Entropy> = Arc::new(OsEntropy);
+        let header =
+            build_new_file_header(config.compression_mode, config.master_key(), entropy.as_ref())?;
         let mut bytes = vec![0u8; PAGE_SIZE];
         let mut p = Page::zeroed();
         encode_header(&header, &mut p);
@@ -868,6 +904,7 @@ impl Pager<FileHandle> {
             next_snapshot_id: Arc::new(AtomicU64::new(1)),
             derived_key,
             main_high_water: 0,
+            entropy,
         })
     }
 }
@@ -899,6 +936,7 @@ impl<F: FileBackend> Pager<F> {
         wal: F,
         wal_path: std::path::PathBuf,
         config: Config,
+        entropy: Arc<dyn Entropy>,
     ) -> Result<Self> {
         if config.cache_frames == 0 {
             return Err(Error::InvalidArgument("cache_frames must be >= 1"));
@@ -906,7 +944,12 @@ impl<F: FileBackend> Pager<F> {
         refuse_compression_without_feature(config.compression_mode)?;
         refuse_encryption_without_feature(config.encryption_key.is_some())?;
         let mut header = if main.is_empty()? {
-            initialise_file(&main, config.compression_mode, config.master_key())?
+            initialise_file(
+                &main,
+                config.compression_mode,
+                config.master_key(),
+                entropy.as_ref(),
+            )?
         } else {
             load_header(&main)?
         };
@@ -919,6 +962,7 @@ impl<F: FileBackend> Pager<F> {
             &mut header,
             &config,
             derived_key.as_ref(),
+            Arc::clone(&entropy),
         )?;
         let view: HashMap<PageId, Arc<Page>> = recovered_view
             .into_iter()
@@ -944,6 +988,7 @@ impl<F: FileBackend> Pager<F> {
             next_snapshot_id: Arc::new(AtomicU64::new(1)),
             derived_key,
             main_high_water: 0,
+            entropy,
         };
         pager.main_high_water = pager.main_pages_for_len(file_len);
         pager.debug_assert_recovered_pages_covered();
@@ -2251,7 +2296,13 @@ impl<F: FileBackend> Pager<F> {
         #[cfg(feature = "encryption")]
         {
             let mut out = [0u8; PAGE_SIZE + ENCRYPTION_OVERHEAD];
-            crate::crypto::encrypt_page(key.as_bytes(), id.get(), page.as_bytes(), &mut out)?;
+            crate::crypto::encrypt_page(
+                key.as_bytes(),
+                id.get(),
+                page.as_bytes(),
+                &mut out,
+                self.entropy.as_ref(),
+            )?;
             Ok(out)
         }
         #[cfg(not(feature = "encryption"))]
@@ -2422,8 +2473,9 @@ fn initialise_file<F: FileBackend>(
     handle: &F,
     compression_mode: CompressionMode,
     encryption_key: Option<&[u8; 32]>,
+    entropy: &dyn Entropy,
 ) -> Result<FileHeader> {
-    let header = build_new_file_header(compression_mode, encryption_key)?;
+    let header = build_new_file_header(compression_mode, encryption_key, entropy)?;
     let mut p = Page::zeroed();
     encode_header(&header, &mut p);
     handle.set_len(PAGE_SIZE as u64)?;
@@ -2437,44 +2489,35 @@ fn initialise_file<F: FileBackend>(
 fn build_new_file_header(
     compression_mode: CompressionMode,
     encryption_key: Option<&[u8; 32]>,
+    entropy: &dyn Entropy,
 ) -> Result<FileHeader> {
     match (compression_mode, encryption_key) {
         (CompressionMode::Off, None) => Ok(FileHeader::new_empty()),
         (CompressionMode::Lz4, None) => Ok(FileHeader::new_empty_with_compression()),
         (CompressionMode::Off, Some(_)) => {
-            let salt = fresh_kdf_salt()?;
+            let salt = fresh_kdf_salt(entropy)?;
             Ok(FileHeader::new_empty_with_encryption(salt))
         }
         (CompressionMode::Lz4, Some(_)) => {
-            let salt = fresh_kdf_salt()?;
+            let salt = fresh_kdf_salt(entropy)?;
             Ok(FileHeader::new_empty_with_encryption_and_compression(salt))
         }
     }
 }
 
-/// Pull 32 bytes of CSPRNG into a fresh KDF
-/// salt. Returns [`Error::Io`] on CSPRNG failure (the only failure
-/// mode). When the `encryption` Cargo feature is OFF the function
-/// is still defined so the open path can pattern-match on
-/// `encryption_key.is_some()` without `#[cfg]` salting at every
-/// call site; without the feature it falls back to the `rand`
-/// crate's OS RNG (we already pull `rand = "0.9"` in unconditionally).
+/// Pull 32 bytes from the injected [`Entropy`] into a fresh KDF salt.
+/// The source itself handles the OS `getrandom` / `rand` split (see
+/// [`OsEntropy`]); this function stays feature-agnostic so the open
+/// path can pattern-match on `encryption_key.is_some()` without a
+/// `#[cfg]` at every call site. The `Result` is retained (always
+/// `Ok`) to keep [`build_new_file_header`]'s signature stable.
+// allow: entropy fill is infallible, but the Ok-only wrap keeps the
+// build_new_file_header / initialise_file call chain uniformly fallible.
 #[allow(clippy::unnecessary_wraps)]
-fn fresh_kdf_salt() -> Result<[u8; 32]> {
-    #[cfg(feature = "encryption")]
-    {
-        let mut out = [0u8; 32];
-        getrandom::getrandom(&mut out)
-            .map_err(|e| Error::Io(std::io::Error::other(format!("getrandom failure: {e}"))))?;
-        Ok(out)
-    }
-    #[cfg(not(feature = "encryption"))]
-    {
-        use rand::RngCore;
-        let mut out = [0u8; 32];
-        rand::rng().fill_bytes(&mut out);
-        Ok(out)
-    }
+fn fresh_kdf_salt(entropy: &dyn Entropy) -> Result<[u8; 32]> {
+    let mut out = [0u8; 32];
+    entropy.fill_bytes(&mut out);
+    Ok(out)
 }
 
 /// Given the persisted on-disk header and the
@@ -2592,6 +2635,7 @@ fn recover_or_create_wal<F: FileBackend>(
     header: &mut FileHeader,
     config: &Config,
     derived_key: Option<&PageEncryptionKey>,
+    entropy: Arc<dyn Entropy>,
 ) -> Result<(Wal<F>, HashMap<PageId, Page>, Option<Page>)> {
     let expected_salt = salt_from_header(header);
     let wal_key_bytes = derived_key.map(|k| *k.as_bytes());
@@ -2610,6 +2654,7 @@ fn recover_or_create_wal<F: FileBackend>(
             recovered.end_offset,
             recovered.committed_frames,
             config.wal_config(),
+            entropy,
         );
         w.set_key(wal_key_bytes);
         let recovered_header = recovered.header.clone();
@@ -2621,7 +2666,7 @@ fn recover_or_create_wal<F: FileBackend>(
         }
         Ok((w, recovered.into_view(), recovered_header))
     } else {
-        let mut w = Wal::<F>::create_fresh_with(wal, wal_path, config.wal_config())?;
+        let mut w = Wal::<F>::create_fresh_with(wal, wal_path, config.wal_config(), entropy)?;
         w.set_key(wal_key_bytes);
         stamp_salt_into_header(header, w.salt());
         write_header_to_backend(main, header)?;
