@@ -1550,18 +1550,23 @@ impl<T: Document + Send + 'static> IterAll<'_, T> {
     /// touched).
     fn refill(&mut self) -> Result<()> {
         let pager_arc: Arc<Mutex<Pager<FileHandle>>> = Arc::clone(self.txn.inner.env().pager());
-        let mut pager = pager_arc.lock().map_err(|_| Error::Busy {
+        let pager = pager_arc.lock().map_err(|_| Error::Busy {
             kind: obj_core::LockKind::WriterInProcess,
         })?;
         let root_pid = PageId::new(self.descriptor.primary_root)
             .ok_or(Error::InvalidArgument("collection primary_root is zero"))?;
-        let tree = BTree::<FileHandle>::open(&pager, root_pid)?;
         let start = match &self.last_emitted_key {
             Some(k) => Bound::Excluded(k.clone()),
             None => Bound::Unbounded,
         };
         let collection_id = self.descriptor.collection_id;
-        let iter = tree.range(&mut pager, (start, Bound::Unbounded))?;
+        let snapshot = self.txn.inner.snapshot();
+        let iter = BTree::<FileHandle>::range_via_snapshot(
+            &pager,
+            snapshot,
+            root_pid,
+            (start, Bound::Unbounded),
+        )?;
         let mut yielded: usize = 0;
         let mut last_key: Option<Vec<u8>> = None;
         let mut raw: Vec<RawRow> = Vec::with_capacity(ITER_ALL_BATCH);
@@ -1579,7 +1584,6 @@ impl<T: Document + Send + 'static> IterAll<'_, T> {
         if yielded < ITER_ALL_BATCH {
             self.finished = true;
         }
-        let snapshot = self.txn.inner.snapshot();
         let mut batch: VecDeque<Result<(Id, T)>> = VecDeque::with_capacity(raw.len());
         for row in raw {
             batch.push_back(decode_raw_row::<T>(&pager, snapshot, collection_id, row));

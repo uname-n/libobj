@@ -1796,18 +1796,46 @@ fn scan_all_in_write_txn<T: Document>(
     Ok(out)
 }
 
-/// Read-side full scan: collect raw rows, then decode each through the
-/// reader's pinned [`SchemaSource::Snapshot`]. An
-/// older-version row's stored schema is resolved at the SAME snapshot
-/// LSN as the document bytes; an equal-version row never consults it.
+/// Snapshot-pinned sibling of [`collect_raw_rows`]. Enumerates every
+/// `(Id, raw-bytes)` pair under `primary_root` via
+/// [`BTree::range_via_snapshot`], so every primary-tree page is resolved
+/// as-of `snap` rather than through the live WAL overlay. This keeps a
+/// Read-txn full scan consistent with its pinned LSN — a concurrent
+/// writer's post-snapshot commits (including a freed-then-recycled page)
+/// cannot leak into the walk.
+///
+/// The iterator carries its own bounded `MAX_RANGE_NODES` budget.
+fn collect_raw_rows_via_snapshot(
+    pager: &Pager<FileHandle>,
+    snap: &obj_core::ReaderSnapshot<FileHandle>,
+    primary_root: u64,
+) -> Result<Vec<(Id, Vec<u8>)>> {
+    let root_pid = PageId::new(primary_root)
+        .ok_or(Error::InvalidArgument("collection primary_root is zero"))?;
+    let iter = BTree::<FileHandle>::range_via_snapshot(pager, snap, root_pid, ..)?;
+    let mut out = Vec::new();
+    for entry in iter {
+        let (key, value) = entry?;
+        let id = Id::from_be_bytes(&key)
+            .ok_or(Error::InvalidArgument("primary B-tree key is not an Id"))?;
+        out.push((id, value));
+    }
+    Ok(out)
+}
+
+/// Read-side full scan: collect raw rows via the snapshot-pinned walk,
+/// then decode each through the reader's pinned
+/// [`SchemaSource::Snapshot`]. An older-version row's stored schema is
+/// resolved at the SAME snapshot LSN as the document bytes; an
+/// equal-version row never consults it.
 fn snapshot_scan_via_btree<T: Document>(
     snap: &obj_core::ReaderSnapshot<FileHandle>,
     env: &obj_core::TxnEnv<FileHandle>,
     primary_root: u64,
     collection_id: u32,
 ) -> Result<Vec<(Id, T)>> {
-    let mut pager = lock_pager(env)?;
-    let rows = collect_raw_rows(&mut pager, primary_root)?;
+    let pager = lock_pager(env)?;
+    let rows = collect_raw_rows_via_snapshot(&pager, snap, primary_root)?;
     let mut out = Vec::with_capacity(rows.len());
     for (id, bytes) in rows {
         let doc = decode_with::<T, FileHandle>(
