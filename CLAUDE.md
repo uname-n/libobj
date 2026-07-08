@@ -190,7 +190,10 @@ cargo clippy --workspace --all-targets        # also: --all-features
 cargo test --workspace
 cargo deny check                              # licenses, advisories, sources, AND duplicate dep versions
 cargo audit                                   # advisory database
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features   # rustdoc-only lints
 ```
+
+`cargo doc` catches the rustdoc-only lints the other checks miss — broken/unresolved intra-doc links, `rustdoc::private_intra_doc_links` (public docs linking to private items), and `rustdoc::redundant_explicit_links` — none of which fire under clippy/test/deny/audit. `--no-deps` scopes it to workspace crates; `-D warnings` makes any such lint fail the build.
 
 `cargo deny` denies duplicate dependency versions (R10). If a new dep introduces one, either unify the version or add a documented entry to `skip` in `deny.toml` (mirroring the `// allow: WHY` convention).
 
