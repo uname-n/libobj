@@ -807,13 +807,20 @@ fn walk_schema<'a>(bytes: &'a [u8], schema: &DynamicSchema) -> Result<(Dynamic, 
     let mut next_schema: DynamicSchema = schema.clone();
     let mut next_path: String = String::new();
     let mut iters: usize = 0;
+    // Running count of materialized `Dynamic` nodes. Each `decode_slot`
+    // call produces exactly one node (a scalar or a composite container),
+    // so this is the walker's analogue of `decode_value`'s `nodes` and is
+    // capped at the same `MAX_DYNAMIC_NODES` ceiling `Dynamic` documents.
+    // It is the primary total-work bound; `iter_cap` remains only as a
+    // belt-and-suspenders backstop on the stack-depth path.
+    let mut nodes: usize = 0;
     let iter_cap = (1 + MAX_SCHEMA_DEPTH) * (1 + MAX_DYNAMIC_NODES);
     loop {
         iters = iters.checked_add(1).ok_or(Error::SchemaDepthExceeded {
             depth: MAX_SCHEMA_DEPTH,
         })?;
         check_walk_schema_bounds(iters, iter_cap, stack.len())?;
-        let outcome = decode_slot(rest, &next_schema, &next_path, &mut stack)?;
+        let outcome = decode_slot(rest, &next_schema, &next_path, &mut stack, &mut nodes)?;
         rest = outcome.rest;
         match advance_after_slot(outcome.value, &mut stack, next_path)? {
             WalkStep::Complete(root) => return Ok((root, rest)),
@@ -915,13 +922,36 @@ struct SlotOutcome<'a> {
     rest: &'a [u8],
 }
 
+/// Charge one materialized `Dynamic` node against the running `nodes`
+/// count and reject once it exceeds the documented [`MAX_DYNAMIC_NODES`]
+/// ceiling. Mirrors `decode_value`'s per-node accounting so a forged
+/// oversize `Seq`/`Map` length prefix cannot amplify a handful of
+/// payload bytes into ~33× the documented node budget.
+fn charge_node(nodes: &mut usize, path: &str) -> Result<()> {
+    *nodes = nodes
+        .checked_add(1)
+        .filter(|n| *n <= MAX_DYNAMIC_NODES)
+        .ok_or_else(|| Error::SchemaTypeMismatch {
+            expected: "node-count",
+            found: "node-count-exceeds-bound",
+            path: path.to_owned(),
+        })?;
+    Ok(())
+}
+
 /// Decode a single schema slot.
+///
+/// `nodes` is the running count of materialized `Dynamic` nodes. Every
+/// slot — scalar or composite — is one node, counted (via
+/// [`charge_node`]) before dispatch.
 fn decode_slot<'a>(
     bytes: &'a [u8],
     schema: &DynamicSchema,
     path: &str,
     stack: &mut Vec<Frame>,
+    nodes: &mut usize,
 ) -> Result<SlotOutcome<'a>> {
+    charge_node(nodes, path)?;
     match schema {
         DynamicSchema::Null => Ok(SlotOutcome {
             value: Some(Dynamic::Null),
@@ -1639,6 +1669,37 @@ mod tests {
         let bytes = vec![1u8; MAX_SCHEMA_DEPTH + 16];
         let err = Dynamic::from_postcard_bytes(&bytes, &s).expect_err("depth");
         assert!(matches!(err, Error::SchemaDepthExceeded { .. }));
+    }
+
+    #[test]
+    fn schema_walker_rejects_oversize_seq_at_node_ceiling() {
+        // A historical schema of `Seq(struct-with-N-Null-fields)`: each
+        // element materializes N+1 nodes but consumes ZERO payload bytes
+        // (postcard emits nothing for a `Null`), so a tampered outer `Seq`
+        // length prefix amplifies a handful of bytes into a node explosion.
+        let elem = DynamicSchema::map([
+            ("a", DynamicSchema::Null),
+            ("b", DynamicSchema::Null),
+            ("c", DynamicSchema::Null),
+        ]);
+        let schema = DynamicSchema::seq(elem);
+        // Forge the outer length to 65 535 (`MAX_DYNAMIC_NODES - 1`, so it
+        // passes the per-Seq length guard) as a LEB128 varint: 0xFFFF.
+        assert_eq!(MAX_DYNAMIC_NODES, 65_536);
+        let bytes = [0xFF_u8, 0xFF, 0x03];
+        let err = Dynamic::from_postcard_bytes(&bytes, &schema).expect_err("node ceiling");
+        // Must trip the node-count cap, NOT run to the ~2.16M `iter_cap`
+        // (which would materialize ~33× the documented ceiling first).
+        assert!(
+            matches!(
+                err,
+                Error::SchemaTypeMismatch {
+                    found: "node-count-exceeds-bound",
+                    ..
+                }
+            ),
+            "expected node-count cap error, got {err:?}",
+        );
     }
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]

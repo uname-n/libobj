@@ -966,8 +966,12 @@ obj_error_t obj_iter_next(obj_iter_t *iter,
  * - `path` must be a non-null pointer to a NUL-terminated UTF-8
  *   string. The pointee is read but not retained.
  * - `out_db` must be a non-null pointer to a writable
- *   `obj_db_t*`. The pointee is unconditionally written before
- *   return (NULL on failure).
+ *   `obj_db_t*`. Whenever `out_db` is non-null the pointee is set
+ *   to NULL before any fallible work runs, so it is left NULL on
+ *   every failure path — including a caught panic, where this
+ *   returns [`OBJ_ERR_PANIC`] with `*out_db == NULL` rather than
+ *   the (weaker) "undefined on caught panic" contract of
+ *   [`catch_ffi`].
  */
  obj_error_t obj_open(const char *path, obj_db_t **out_db);
 
@@ -991,7 +995,10 @@ obj_error_t obj_iter_next(obj_iter_t *iter,
  *   readable and initialised. The pointee is read but not
  *   retained.
  * - `out_db` must be a non-null pointer to a writable
- *   `obj_db_t*`.
+ *   `obj_db_t*`. Whenever `out_db` is non-null the pointee is set
+ *   to NULL before any fallible work runs, so it is left NULL on
+ *   every failure path — including a caught panic (returns
+ *   [`OBJ_ERR_PANIC`] with `*out_db == NULL`).
  */
  obj_error_t obj_open_with_config(const char *path, const obj_config_t *config, obj_db_t **out_db);
 

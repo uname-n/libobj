@@ -445,26 +445,31 @@ fn sync_mode_from_c(raw: obj_sync_mode_t) -> obj_engine::SyncMode {
 /// - `path` must be a non-null pointer to a NUL-terminated UTF-8
 ///   string. The pointee is read but not retained.
 /// - `out_db` must be a non-null pointer to a writable
-///   `obj_db_t*`. The pointee is unconditionally written before
-///   return (NULL on failure).
+///   `obj_db_t*`. Whenever `out_db` is non-null the pointee is set
+///   to NULL before any fallible work runs, so it is left NULL on
+///   every failure path — including a caught panic, where this
+///   returns [`OBJ_ERR_PANIC`] with `*out_db == NULL` rather than
+///   the (weaker) "undefined on caught panic" contract of
+///   [`catch_ffi`].
 #[no_mangle]
 pub unsafe extern "C" fn obj_open(path: *const c_char, out_db: *mut *mut obj_db_t) -> obj_error_t {
     catch_ffi(OBJ_ERR_PANIC, || {
-        if path.is_null() || out_db.is_null() {
-            if !out_db.is_null() {
-                // SAFETY: out_db is non-null in this branch (just checked) and points to a writable obj_db_t* per the # Safety contract.
-                unsafe { *out_db = ptr::null_mut() };
-            }
+        if out_db.is_null() {
+            return OBJ_ERR_INVALID_ARG;
+        }
+        // NULL-first: establish the failure postcondition before ANY
+        // fallible work (notably the panic-prone `Db::open`). If that work
+        // panics, `catch_ffi` returns OBJ_ERR_PANIC and the caller still
+        // observes `*out_db == NULL`, honouring this function's doc.
+        // SAFETY: out_db is non-null (just checked) and points to a writable obj_db_t* per the # Safety contract.
+        unsafe { *out_db = ptr::null_mut() };
+        if path.is_null() {
             return OBJ_ERR_INVALID_ARG;
         }
         // SAFETY: path is non-null (checked above) and a NUL-terminated C string per the # Safety contract.
         let path_buf = match unsafe { cstr_to_path(path) } {
             Ok(p) => p,
-            Err(code) => {
-                // SAFETY: out_db is non-null (checked above) and points to a writable obj_db_t* per the # Safety contract.
-                unsafe { *out_db = ptr::null_mut() };
-                return code;
-            }
+            Err(code) => return code,
         };
         match obj_engine::Db::open(&path_buf) {
             Ok(db) => {
@@ -473,11 +478,7 @@ pub unsafe extern "C" fn obj_open(path: *const c_char, out_db: *mut *mut obj_db_
                 unsafe { *out_db = Box::into_raw(handle) };
                 OBJ_OK
             }
-            Err(e) => {
-                // SAFETY: out_db is non-null (checked above) and points to a writable obj_db_t* per the # Safety contract.
-                unsafe { *out_db = ptr::null_mut() };
-                error_to_code(&e)
-            }
+            Err(e) => error_to_code(&e),
         }
     })
 }
@@ -501,7 +502,10 @@ pub unsafe extern "C" fn obj_open(path: *const c_char, out_db: *mut *mut obj_db_
 ///   readable and initialised. The pointee is read but not
 ///   retained.
 /// - `out_db` must be a non-null pointer to a writable
-///   `obj_db_t*`.
+///   `obj_db_t*`. Whenever `out_db` is non-null the pointee is set
+///   to NULL before any fallible work runs, so it is left NULL on
+///   every failure path — including a caught panic (returns
+///   [`OBJ_ERR_PANIC`] with `*out_db == NULL`).
 #[no_mangle]
 pub unsafe extern "C" fn obj_open_with_config(
     path: *const c_char,
@@ -509,30 +513,26 @@ pub unsafe extern "C" fn obj_open_with_config(
     out_db: *mut *mut obj_db_t,
 ) -> obj_error_t {
     catch_ffi(OBJ_ERR_PANIC, || {
-        if path.is_null() || config.is_null() || out_db.is_null() {
-            if !out_db.is_null() {
-                // SAFETY: out_db is non-null in this branch (just checked) and points to a writable obj_db_t* per the # Safety contract.
-                unsafe { *out_db = ptr::null_mut() };
-            }
+        if out_db.is_null() {
+            return OBJ_ERR_INVALID_ARG;
+        }
+        // NULL-first: see [`obj_open`]. Guarantees `*out_db == NULL` on
+        // every failure path (including a caught panic from `Db::open_with`)
+        // before any fallible work begins.
+        // SAFETY: out_db is non-null (just checked) and points to a writable obj_db_t* per the # Safety contract.
+        unsafe { *out_db = ptr::null_mut() };
+        if path.is_null() || config.is_null() {
             return OBJ_ERR_INVALID_ARG;
         }
         // SAFETY: path is non-null (checked above) and a NUL-terminated C string per the # Safety contract.
         let path_buf = match unsafe { cstr_to_path(path) } {
             Ok(p) => p,
-            Err(code) => {
-                // SAFETY: out_db is non-null (checked above) and points to a writable obj_db_t* per the # Safety contract.
-                unsafe { *out_db = ptr::null_mut() };
-                return code;
-            }
+            Err(code) => return code,
         };
         // SAFETY: config is non-null (checked above) and a readable obj_config_t prefix per the # Safety contract; build_config_from_c only reads struct_size-covered fields.
         let cfg = match unsafe { build_config_from_c(config) } {
             Ok(c) => c,
-            Err(code) => {
-                // SAFETY: out_db is non-null (checked above) and points to a writable obj_db_t* per the # Safety contract.
-                unsafe { *out_db = ptr::null_mut() };
-                return code;
-            }
+            Err(code) => return code,
         };
         match obj_engine::Db::open_with(&path_buf, cfg) {
             Ok(db) => {
@@ -541,11 +541,7 @@ pub unsafe extern "C" fn obj_open_with_config(
                 unsafe { *out_db = Box::into_raw(handle) };
                 OBJ_OK
             }
-            Err(e) => {
-                // SAFETY: out_db is non-null (checked above) and points to a writable obj_db_t* per the # Safety contract.
-                unsafe { *out_db = ptr::null_mut() };
-                error_to_code(&e)
-            }
+            Err(e) => error_to_code(&e),
         }
     })
 }
