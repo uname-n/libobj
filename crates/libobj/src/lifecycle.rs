@@ -13,7 +13,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::ffi::{CStr, CString};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use crate::error::{
@@ -88,8 +88,23 @@ pub(crate) struct DbInner {
     /// in [`Drop`].
     error_ring: [AtomicPtr<c_char>; ERROR_RING_LEN],
     /// Monotonic slot cursor; `% ERROR_RING_LEN` selects the
-    /// `error_ring` slot the next [`Self::set_error`] claims.
+    /// `error_ring` slot the next [`Self::set_error`] claims. Advanced
+    /// only while `error_lock` is held, so its value and the swap it
+    /// drives can never be observed out of order.
     error_seq: AtomicUsize,
+    /// Serialises the ring update inside [`Self::set_error`] so slot
+    /// reclamation happens strictly in `error_seq` order. Without it,
+    /// two calls whose seq values differ by exactly [`ERROR_RING_LEN`]
+    /// target the same slot and can interleave between `fetch_add` and
+    /// `swap` — freeing a pointer out of order and dangling the freshest
+    /// published `last_error` (a use-after-free the atomics alone do not
+    /// prevent). The guarded region is short and never panics, so
+    /// poisoning cannot occur; a poisoned lock is nonetheless recovered
+    /// defensively rather than propagated across the FFI boundary. Reads
+    /// via [`obj_errmsg`] stay lock-free — they only load the
+    /// `last_error` atomic, which the guarded writer keeps pointing at a
+    /// live ring string.
+    error_lock: Mutex<()>,
 }
 
 impl DbInner {
@@ -114,14 +129,30 @@ impl DbInner {
             },
         };
         let raw = cstring.into_raw();
-        // Claim a ring slot; the string it displaces is ERROR_RING_LEN
-        // errors old, so any reader that observed it has had a full
-        // grace window and we can reclaim it now.
-        let slot = self.error_seq.fetch_add(1, Ordering::AcqRel) % ERROR_RING_LEN;
-        let displaced = self.error_ring[slot].swap(raw, Ordering::AcqRel);
-        // Publish as the latest message any obj_errmsg reader sees;
-        // `raw` lives in the ring, so this view never dangles early.
-        self.last_error.store(raw, Ordering::Release);
+        // Serialise the whole claim-swap-publish sequence so the ring
+        // reclaims strictly in `error_seq` order. Without this lock two
+        // calls whose seq differ by exactly ERROR_RING_LEN target the
+        // same slot and can invert between `fetch_add` and `swap`,
+        // freeing a pointer out of order and leaving `last_error`
+        // pointing at freed storage. The guarded ops never panic, so the
+        // lock cannot truly be poisoned; recover the guard defensively
+        // rather than propagate a panic across the FFI boundary.
+        let displaced = {
+            let _guard = self.error_lock.lock().unwrap_or_else(PoisonError::into_inner);
+            // Claim a ring slot; because the whole region is serialised,
+            // the string this slot displaces is exactly ERROR_RING_LEN
+            // errors old, so any reader that observed it has had a full
+            // grace window and it is safe to reclaim below.
+            let slot = self.error_seq.fetch_add(1, Ordering::AcqRel) % ERROR_RING_LEN;
+            let displaced = self.error_ring[slot].swap(raw, Ordering::AcqRel);
+            // Publish as the latest message any obj_errmsg reader sees;
+            // `raw` lives in the ring, so this view never dangles early.
+            self.last_error.store(raw, Ordering::Release);
+            displaced
+        };
+        // The displaced pointer was swapped out under the lock and is now
+        // owned solely by this call, so it is freed after releasing the
+        // guard to keep the critical section short.
         if !displaced.is_null() {
             // SAFETY: a non-null `displaced` was produced by a prior CString::into_raw into this ring slot (set_error is the only writer of error_ring) and has not been freed, so reclaiming it via from_raw exactly once is sound.
             drop(unsafe { CString::from_raw(displaced) });
@@ -196,6 +227,7 @@ impl obj_db_t {
                 last_error: AtomicPtr::new(ptr::null_mut()),
                 error_ring: core::array::from_fn(|_| AtomicPtr::new(ptr::null_mut())),
                 error_seq: AtomicUsize::new(0),
+                error_lock: Mutex::new(()),
             }),
         }
     }
