@@ -33,11 +33,25 @@
 //! gate).  The next writer proceeds against that consistent state.
 //! This replaces a permanent-Busy failure mode with a
 //! recover-and-continue one.
+//!
+//! **The pager mutex, too, recovers from poison.**  The serialization
+//! gate above is an `AtomicBool`, but the pager itself lives behind an
+//! `Arc<Mutex<Pager>>`, and a `std::sync::Mutex` *does* poison if a
+//! thread panics while holding its guard.  To keep the guarantee above
+//! whole even for a panic that fires *under the pager lock*, every
+//! pager acquire in this module goes through [`lock_pager_recovering`],
+//! which recovers the guard via [`PoisonError::into_inner`] instead of
+//! mapping poison to a permanent `Busy{WriterInProcess}`.  Recovery is
+//! sound because a poisoned pager mutex reflects only an in-process
+//! panic, never on-disk corruption (that is reported separately as
+//! [`Error::Corruption`]); the panicking [`WriteTxn`]'s `Drop` still
+//! rolls the pager back to its last committed state before the next
+//! locker sees it.
 
 #![forbid(unsafe_code)]
 
 use core::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use crate::error::{Error, LockKind, Result};
@@ -278,13 +292,12 @@ impl<'db, F: FileBackend> WriteTxn<'db, F> {
     ///
     /// # Errors
     ///
-    /// - [`Error::Busy`] with `LockKind::WriterInProcess` if the pager
-    ///   mutex is poisoned.
+    /// Infallible today: the pager mutex is acquired with poison
+    /// recovery (see [`lock_pager_recovering`]), so a prior
+    /// panic-under-lock no longer surfaces here as `Busy`.
     pub fn from_acquire(env: &'db TxnEnv<F>, acq: WriteAcquire<F>) -> Result<Self> {
         let header_at_begin = {
-            let mut pager = env.pager.lock().map_err(|_| Error::Busy {
-                kind: LockKind::WriterInProcess,
-            })?;
+            let mut pager = lock_pager_recovering(&env.pager);
             pager.begin_txn();
             pager.header_snapshot()
         };
@@ -333,18 +346,17 @@ impl<'db, F: FileBackend> WriteTxn<'db, F> {
         pager.alloc_page()
     }
 
-    /// Acquire the pager mutex.  Bubble a poisoned mutex up as
-    /// `WriterInProcess` — every txn method that takes the pager
-    /// goes through here so the failure mode is uniform.
+    /// Acquire the pager mutex.  Recovers from a poisoned mutex rather
+    /// than wedging the handle — every txn method that takes the pager
+    /// goes through here so the failure mode is uniform (see
+    /// [`lock_pager_recovering`] for why recovery is sound).
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Busy`] with `LockKind::WriterInProcess` if
-    /// the mutex is poisoned by a previous panic.
+    /// Infallible today; retains the `Result` return so callers need
+    /// not change if a genuinely fallible acquire is reintroduced.
     pub fn lock_pager(&self) -> Result<MutexGuard<'_, Pager<F>>> {
-        self.env.pager.lock().map_err(|_| Error::Busy {
-            kind: LockKind::WriterInProcess,
-        })
+        Ok(lock_pager_recovering(&self.env.pager))
     }
 
     /// Access the underlying env.  Used by callers (e.g. `obj`
@@ -406,16 +418,46 @@ impl<F: FileBackend> Drop for WriteTxn<'_, F> {
             return;
         }
         let snap = self.header_at_begin.take();
-        if let Ok(mut pager) = self.env.pager.lock() {
-            rollback_pending(&mut pager);
-            if let Some(s) = snap {
-                let _ = pager.restore_header_snapshot(s);
-            }
-            pager.end_txn();
+        // Recover a poisoned pager mutex here rather than skipping
+        // rollback: if THIS txn is unwinding from a panic that fired
+        // under the pager lock, the mutex is poisoned, and a plain
+        // `if let Ok(..)` would silently drop the rollback and leave the
+        // pager wedged in permanent `Busy`. Recovering lets rollback run
+        // (restoring last-committed state), delivering the module's
+        // recover-and-continue guarantee. See [`lock_pager_recovering`].
+        let mut pager = lock_pager_recovering(&self.env.pager);
+        rollback_pending(&mut pager);
+        if let Some(s) = snap {
+            let _ = pager.restore_header_snapshot(s);
         }
+        pager.end_txn();
+        drop(pager);
         #[cfg(feature = "tracing")]
         tracing::debug!("WriteTxn dropped without commit/rollback; pending writes discarded");
     }
+}
+
+/// Acquire the pager mutex, recovering from poison instead of wedging
+/// the handle.
+///
+/// A `std::sync::Mutex` poisons when a thread panics *while holding its
+/// guard*.  The pager lives behind `Arc<Mutex<Pager>>`, so a panic under
+/// the pager lock would poison it; the previous `.map_err(|_| Busy)`
+/// mapping then turned **every** later `begin`/read/write into a
+/// permanent `Busy{WriterInProcess}` (the poison persists until reopen),
+/// contradicting this module's recover-and-continue contract.
+///
+/// Recovering via [`PoisonError::into_inner`] is sound here: a poisoned
+/// pager mutex signals only an *in-process* panic, never on-disk
+/// corruption — real corruption is surfaced separately as
+/// [`Error::Corruption`] by the bounds-checked decode paths, so
+/// recovering the lock cannot mask it.  In-memory consistency is
+/// restored on the next transactional step: a panicking [`WriteTxn`]'s
+/// `Drop` rolls back to `header_at_begin` (draining pending writes and
+/// restoring the header snapshot), leaving the pager at its last
+/// committed state for the next locker.
+fn lock_pager_recovering<F: FileBackend>(pager: &Mutex<Pager<F>>) -> MutexGuard<'_, Pager<F>> {
+    pager.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Discard the pager's pending-transaction buffer.  Idempotent.
@@ -530,9 +572,7 @@ impl<'db, F: FileBackend> ReadTxn<'db, F> {
             None => None,
         };
         let snapshot = {
-            let mut pager = env.pager.lock().map_err(|_| Error::Busy {
-                kind: LockKind::WriterInProcess,
-            })?;
+            let mut pager = lock_pager_recovering(&env.pager);
             pager.reader_snapshot()?
         };
         Ok(Self {
@@ -554,9 +594,7 @@ impl<'db, F: FileBackend> ReadTxn<'db, F> {
     ///
     /// As [`ReaderSnapshot::read_page`].
     pub fn read_page(&self, id: PageId) -> Result<Page> {
-        let pager = self.env.pager.lock().map_err(|_| Error::Busy {
-            kind: LockKind::WriterInProcess,
-        })?;
+        let pager = lock_pager_recovering(&self.env.pager);
         Ok(self.snapshot.read_page(&pager, id)?.into_page())
     }
 
@@ -697,6 +735,38 @@ mod tests {
             0,
             "panicking writer's staged write must have been rolled back",
         );
+    }
+
+    /// A panic *under the pager lock* poisons the pager `Mutex`, but the
+    /// txn layer recovers instead of wedging into permanent `Busy`.
+    /// Before the fix, every later `begin`/read re-locked the poisoned
+    /// pager and mapped the poison to `Busy{WriterInProcess}` forever.
+    #[test]
+    fn poisoned_pager_mutex_recovers_and_continues() {
+        let dir = TempDir::new().expect("tmp");
+        let (env, a) = build_env(&dir);
+        let env = Arc::new(env);
+        // Poison the pager mutex directly: panic WHILE holding its guard.
+        let env_for_panic = Arc::clone(&env);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = env_for_panic.pager.lock().expect("lock");
+            panic!("simulated crash under the pager lock");
+        }));
+        assert!(result.is_err(), "closure must have panicked");
+        assert!(env.pager.is_poisoned(), "pager mutex must now be poisoned");
+
+        // Recover-and-continue: a fresh writer still begins, writes, and
+        // commits despite the poisoned pager mutex.
+        let tx = WriteTxn::begin(&env, Duration::from_millis(50))
+            .expect("begin must recover from a poisoned pager mutex");
+        let mut page = Page::zeroed();
+        page.as_bytes_mut()[0] = 0x5A;
+        tx.write_page(a, &page).expect("write");
+        tx.commit().expect("commit");
+
+        let rx = ReadTxn::begin(&env).expect("read must recover from poison");
+        let observed = rx.read_page(a).expect("read");
+        assert_eq!(observed.as_bytes()[0], 0x5A);
     }
 
     /// 4 writer threads × 1000 iterations each — N writers
