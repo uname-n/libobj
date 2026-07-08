@@ -489,10 +489,15 @@ fn encrypted_committed_frame_corruption_before_marker_is_wal_corruption() {
     );
 }
 
-/// With NO commit marker anywhere (the whole generation is
-/// undecryptable), a salt-matching decrypt failure must STILL surface
-/// as `Error::EncryptionKeyInvalid` — the wrong-key smoking gun. This
-/// guards the unchanged branch of the classification.
+/// A committed WAL opened with the WRONG key: every frame fails
+/// Poly1305 verification, so ZERO frames decrypt and no commit marker is
+/// ever found. A salt-matching decrypt failure with nothing decrypted is
+/// the genuine wrong-key smoking gun and must STILL surface as
+/// `Error::EncryptionKeyInvalid`. This is the case that stays unchanged:
+/// the no-marker branch escalates only when `any_frame_decrypted` is
+/// false (contrast `encrypted_torn_uncommitted_no_marker_recovers`,
+/// where an intact frame proves the key and the same no-marker shape is
+/// discarded instead).
 #[cfg(feature = "encryption")]
 #[test]
 fn encrypted_no_commit_marker_decrypt_failure_is_wrong_key() {
@@ -524,6 +529,86 @@ fn encrypted_no_commit_marker_decrypt_failure_is_wrong_key() {
         matches!(err, crate::Error::EncryptionKeyInvalid),
         "no commit marker + decrypt failure must stay EncryptionKeyInvalid; got {err:?}"
     );
+}
+
+/// The torn-UNCOMMITTED-tail case that the #1/#19 fix mis-handled: a
+/// post-checkpoint first transaction whose commit marker never reached
+/// disk AND one of whose non-final frames is bit-flipped, while another
+/// non-final frame stays intact. Because `reset_after_checkpoint`
+/// truncates the WAL to header-only, this generation legitimately has NO
+/// commit marker — yet the intact frame decrypts and CRC-validates,
+/// proving the key correct. Recovery must therefore DISCARD the
+/// uncommitted generation and open cleanly (committed prefix empty), NOT
+/// abort with `Error::EncryptionKeyInvalid`.
+#[cfg(feature = "encryption")]
+#[test]
+fn encrypted_torn_uncommitted_no_marker_recovers() {
+    use crate::platform::FileHandle;
+    use crate::wal::frame::{FRAME_HEADER_SIZE, FRAME_SIZE_ENCRYPTED, WAL_HEADER_SIZE};
+
+    let key = [0x5Du8; 32];
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("enc.obj-wal");
+    let salt = {
+        let mut wal = Wal::create_fresh(&path, WalConfig::default()).expect("create");
+        wal.set_key(Some(key));
+        // A committed transaction, then a checkpoint reset — this rotates
+        // the salt and truncates the WAL back to header-only, so the next
+        // transaction re-enters the "no commit marker yet" window.
+        let mut t = wal.begin_txn();
+        t.append(id(1), &page_with(0xAA)).expect("pre-checkpoint");
+        t.commit().expect("commit pre-checkpoint");
+        wal.reset_after_checkpoint().expect("checkpoint reset");
+        // First post-checkpoint transaction: three staged frames. On
+        // disk this is frame 0 (commit=false), frame 1 (commit=false),
+        // frame 2 (commit=true — the marker).
+        let mut t = wal.begin_txn();
+        t.append(id(10), &page_with(0xB0)).expect("f0");
+        t.append(id(11), &page_with(0xB1)).expect("f1");
+        t.append(id(12), &page_with(0xB2)).expect("f2 (marker)");
+        t.commit().expect("commit post-checkpoint");
+        wal.salt()
+    };
+    // Simulate power loss: the commit marker (frame 2) never persisted —
+    // truncate it off — and frame 0's ciphertext body is torn (bit-flip
+    // past its 64-byte plaintext header so the salt stays intact). Frame
+    // 1 is left intact, so it still decrypts and proves the key correct.
+    {
+        use std::fs::OpenOptions;
+        use std::io::{Read as _, Seek, SeekFrom, Write as _};
+        let keep = WAL_HEADER_SIZE as u64 + 2 * FRAME_SIZE_ENCRYPTED as u64;
+        let file = FileHandle::open_or_create(&path).expect("open wal");
+        file.set_len(keep).expect("drop unsynced marker frame");
+
+        let flip_at = WAL_HEADER_SIZE as u64 + FRAME_HEADER_SIZE as u64 + 128;
+        let mut f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open wal rw");
+        f.seek(SeekFrom::Start(flip_at)).expect("seek");
+        let mut byte = [0u8; 1];
+        f.read_exact(&mut byte).expect("read body byte");
+        byte[0] ^= 0x40;
+        f.seek(SeekFrom::Start(flip_at)).expect("seek back");
+        f.write_all(&byte).expect("flip body byte");
+    }
+    let file = FileHandle::open_or_create(&path).expect("reopen wal");
+    let recovered = Wal::<FileHandle>::open_for_recovery_with_key(
+        &file,
+        salt,
+        WalConfig::default().size_limit,
+        Some(key),
+    )
+    .expect("torn uncommitted tail with a proven key must recover, not report EncryptionKeyInvalid");
+    assert_eq!(
+        recovered.committed_frames, 0,
+        "no commit marker → nothing committed"
+    );
+    assert!(recovered.view.is_empty(), "uncommitted generation discarded");
+    assert!(!recovered.view.contains_key(&id(10)));
+    assert!(!recovered.view.contains_key(&id(11)));
+    assert!(!recovered.view.contains_key(&id(12)));
 }
 
 /// Write a multi-frame transaction that INCLUDES a page-0

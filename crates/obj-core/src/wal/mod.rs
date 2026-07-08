@@ -448,8 +448,10 @@ impl<F: FileBackend> Wal<F> {
     ///
     /// As [`Self::open_for_recovery_with`], plus
     /// [`Error::EncryptionKeyInvalid`] when a salt-matching frame
-    /// in the WAL fails Poly1305 verification — the smoking-gun
-    /// wrong-key signal.
+    /// in the WAL fails Poly1305 verification AND no other frame
+    /// decrypted successfully — the smoking-gun wrong-key signal. A
+    /// decrypt failure alongside at least one frame that DID decrypt is
+    /// classified by position instead (torn tail vs. `WalCorruption`).
     pub fn open_for_recovery_with_key(
         file: &F,
         expected_salt: u32,
@@ -766,12 +768,25 @@ fn walk_frames<F: FileBackend>(
         // itself: because that marker decrypted and CRC-validated under
         // the same key, the key is provably correct, so the failure is
         // **corruption of a committed frame** (`WalCorruption`), not a
-        // wrong key. We escalate to `EncryptionKeyInvalid` only when no
-        // commit marker was found at all (the whole generation is
-        // undecryptable — the wrong-key smoking gun). Either way the
-        // open is refused (fail-closed); only the reported cause
-        // differs. `first_decrypt_failure_offset` is the earliest such
-        // offset, so checking it covers every later failure too.
+        // wrong key.
+        //
+        // With NO commit marker at all, the inference is subtler. A
+        // no-marker generation is NOT unique to a wrong key: it recurs
+        // after every checkpoint, because `reset_after_checkpoint`
+        // rotates the salt and truncates the WAL to header-only, so the
+        // first transaction re-enters the "committed frames = 0, no
+        // marker yet" window. If some salt-matching frame decrypted AND
+        // CRC-validated (`any_frame_decrypted`), the key is provably
+        // correct, so a no-marker generation is a torn UNCOMMITTED tail:
+        // discard it and open cleanly (`Ok(empty_recovered)` below),
+        // exactly as the plaintext path discards a bad-CRC tail. We
+        // escalate to `EncryptionKeyInvalid` ONLY when nothing decrypted
+        // and a salt-matching decrypt failure exists — the genuine
+        // wrong-key signature (whole generation undecryptable). Either
+        // way the open is refused or discarded fail-closed; no committed
+        // data is ever silently dropped. `first_decrypt_failure_offset`
+        // is the earliest such offset, so checking it covers every later
+        // failure too.
         let has_commit_marker = scan.last_commit_end > WAL_HEADER_SIZE as u64;
         let torn_tail_past_commit = has_commit_marker && fail_off >= scan.last_commit_end;
         if !torn_tail_past_commit {
@@ -780,7 +795,12 @@ fn walk_frames<F: FileBackend>(
                     frame_offset: fail_off,
                 });
             }
-            return Err(Error::EncryptionKeyInvalid);
+            if !scan.any_frame_decrypted {
+                return Err(Error::EncryptionKeyInvalid);
+            }
+            // Key proven correct, no commit marker → torn uncommitted
+            // tail. Fall through to the `last_commit_end <=
+            // WAL_HEADER_SIZE` discard below.
         }
     }
     if scan.last_commit_end <= WAL_HEADER_SIZE as u64 {
@@ -797,8 +817,9 @@ fn walk_frames<F: FileBackend>(
 }
 
 /// Result of pass 1 of the WAL walk. Carries
-/// both the last-commit-end byte offset and the earliest byte offset
-/// at which a salt-matching frame failed to decrypt (if any).
+/// the last-commit-end byte offset, the earliest byte offset
+/// at which a salt-matching frame failed to decrypt (if any), and
+/// whether ANY salt-matching frame decrypted-and-CRC-validated.
 ///
 /// The offset — rather than a bare flag — lets the caller distinguish
 /// a decrypt failure inside the committed prefix (wrong key /
@@ -806,10 +827,18 @@ fn walk_frames<F: FileBackend>(
 /// tail, discarded like the plaintext path). Because pass 1 walks
 /// frames in ascending offset order, the first failure recorded is the
 /// smallest offset, so it represents every later failure too.
+///
+/// `any_frame_decrypted` proves the key correct: a fresh or
+/// post-checkpoint generation legitimately has no commit marker yet, so
+/// a decrypt failure there is the wrong-key smoking gun ONLY when
+/// nothing decrypted. If even one salt-matching frame decrypted and
+/// CRC-validated, the key is provably correct and a no-marker generation
+/// is a torn UNCOMMITTED tail to be discarded, not a wrong-key open.
 #[derive(Debug, Clone, Copy)]
 struct ScanResult {
     last_commit_end: u64,
     first_decrypt_failure_offset: Option<u64>,
+    any_frame_decrypted: bool,
 }
 
 /// Byte offset just past the last full-frame boundary that fits in
@@ -850,6 +879,7 @@ fn find_last_commit_end<F: FileBackend>(
     let mut offset = WAL_HEADER_SIZE as u64;
     let mut last_commit_end = WAL_HEADER_SIZE as u64;
     let mut first_decrypt_failure_offset: Option<u64> = None;
+    let mut any_frame_decrypted = false;
     let mut walked: u64 = 0;
     while let Some(frame_end) = offset.checked_add(frame_size as u64) {
         if frame_end > scan_end {
@@ -863,6 +893,10 @@ fn find_last_commit_end<F: FileBackend>(
         walked = walked.saturating_add(1);
         let frame = read_plaintext_frame_diag(file, offset, key, frame_size, salt)?;
         if let FrameDecode::Ok(header) = decode_frame_header_classified(&frame.buf, salt) {
+            // Salt matched AND CRC validated on the decrypted body — this
+            // proves the key is correct, whether or not the frame is a
+            // commit marker.
+            any_frame_decrypted = true;
             if header.commit {
                 last_commit_end = offset
                     .checked_add(frame_size as u64)
@@ -878,6 +912,7 @@ fn find_last_commit_end<F: FileBackend>(
     Ok(ScanResult {
         last_commit_end,
         first_decrypt_failure_offset,
+        any_frame_decrypted,
     })
 }
 
