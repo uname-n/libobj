@@ -155,8 +155,8 @@ pub const fn encoded_id_suffix_len() -> usize {
 ///
 /// - [`Error::InvalidArgument`] if `fields.len()` disagrees with the
 ///   kind's per-spec contract.
-/// - [`Error::Codec`] if a `String` field contains an embedded
-///   `0x00` byte.
+/// - [`Error::InvalidArgument`] if a `String` field contains an
+///   embedded `0x00` byte.
 pub fn encode_index_key(spec: &IndexSpec, fields: &[Dynamic]) -> Result<EncodedIndexKey> {
     encode_index_key_parts(spec.kind, &spec.key_paths, fields)
 }
@@ -180,8 +180,8 @@ pub fn encode_index_key(spec: &IndexSpec, fields: &[Dynamic]) -> Result<EncodedI
 ///
 /// - [`Error::InvalidArgument`] if `fields.len()` disagrees with
 ///   `key_paths.len()` (the kind's per-spec contract).
-/// - [`Error::Codec`] if a `String` field contains an embedded
-///   `0x00` byte.
+/// - [`Error::InvalidArgument`] if a `String` field contains an
+///   embedded `0x00` byte.
 pub fn encode_index_key_parts(
     kind: IndexKind,
     key_paths: &[String],
@@ -221,7 +221,7 @@ fn validate_key_part_shape(
 ///
 /// # Errors
 ///
-/// - [`Error::Codec`] if `value` is a `String` containing an
+/// - [`Error::InvalidArgument`] if `value` is a `String` containing an
 ///   embedded `0x00` byte.
 pub fn encode_field(value: &Dynamic) -> Result<EncodedIndexKey> {
     encode_scalar(value)

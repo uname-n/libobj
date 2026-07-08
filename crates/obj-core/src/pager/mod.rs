@@ -1734,8 +1734,8 @@ impl<F: FileBackend> Pager<F> {
     /// it drop. Do not hold one open across an unbounded amount of write
     /// traffic. (Partial reclamation up to `min_pinned_lsn` — folding
     /// only frames the reader no longer needs — is **not** implemented:
-    /// the WAL has no per-LSN partial-truncation primitive
-    /// [`reset_after_checkpoint`] resets the whole file with a fresh
+    /// the WAL has no per-LSN partial-truncation primitive.
+    /// `Wal::reset_after_checkpoint` resets the whole file with a fresh
     /// salt and `state.view` is a collapsed `PageId -> latest-version`
     /// map that retains no superseded versions, so there is no safe way
     /// to fold a post-snapshot overwrite without corrupting the pinned
@@ -2472,7 +2472,8 @@ impl<F: FileBackend> Pager<F> {
 /// `feature_flags`.
 ///
 /// When `encryption_key` is `Some`, a fresh
-/// 32-byte `kdf_salt` is generated from the OS CSPRNG and stamped
+/// 32-byte `kdf_salt` is drawn from the injected `Entropy` source
+/// (production defaults to `OsEntropy`/OS CSPRNG) and stamped
 /// into the header at offset 72..104; `format_minor` is bumped to
 /// `2` and `feature_flags` bit 1 is set. Page 0 itself remains
 /// plaintext (the salt MUST be readable by tooling that does not

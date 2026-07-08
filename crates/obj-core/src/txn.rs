@@ -39,7 +39,7 @@
 //! `Arc<Mutex<Pager>>`, and a `std::sync::Mutex` *does* poison if a
 //! thread panics while holding its guard.  To keep the guarantee above
 //! whole even for a panic that fires *under the pager lock*, every
-//! pager acquire in this module goes through [`lock_pager_recovering`],
+//! pager acquire in this module goes through `lock_pager_recovering`,
 //! which recovers the guard via [`PoisonError::into_inner`] instead of
 //! mapping poison to a permanent `Busy{WriterInProcess}`.  Recovery is
 //! sound because a poisoned pager mutex reflects only an in-process
@@ -330,7 +330,7 @@ impl<'db, F: FileBackend> WriteTxn<'db, F> {
     /// # Errors
     ///
     /// Infallible today: the pager mutex is acquired with poison
-    /// recovery (see [`lock_pager_recovering`]), so a prior
+    /// recovery (see `lock_pager_recovering`), so a prior
     /// panic-under-lock no longer surfaces here as `Busy`.
     pub fn from_acquire(env: &'db TxnEnv<F>, acq: WriteAcquire<F>) -> Result<Self> {
         let header_at_begin = {
@@ -386,7 +386,7 @@ impl<'db, F: FileBackend> WriteTxn<'db, F> {
     /// Acquire the pager mutex.  Recovers from a poisoned mutex rather
     /// than wedging the handle — every txn method that takes the pager
     /// goes through here so the failure mode is uniform (see
-    /// [`lock_pager_recovering`] for why recovery is sound).
+    /// `lock_pager_recovering` for why recovery is sound).
     ///
     /// # Errors
     ///
@@ -461,7 +461,7 @@ impl<F: FileBackend> Drop for WriteTxn<'_, F> {
         // `if let Ok(..)` would silently drop the rollback and leave the
         // pager wedged in permanent `Busy`. Recovering lets rollback run
         // (restoring last-committed state), delivering the module's
-        // recover-and-continue guarantee. See [`lock_pager_recovering`].
+        // recover-and-continue guarantee. See `lock_pager_recovering`.
         let mut pager = lock_pager_recovering(&self.env.pager);
         rollback_pending(&mut pager);
         if let Some(s) = snap {
