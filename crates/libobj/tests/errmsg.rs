@@ -15,6 +15,8 @@
 use std::ffi::{CStr, CString};
 use std::path::Path;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use tempfile::TempDir;
 
@@ -199,6 +201,92 @@ fn obtained_pointer_survives_concurrent_set_error() {
     );
 
     // SAFETY: db still open (worker has finished and joined).
+    unsafe { obj_close(db) };
+}
+
+/// Drive one failing count through a fresh read txn like
+/// [`record_ghost_error`], but tolerate the transaction machinery
+/// returning early under heavy concurrent contention instead of
+/// asserting exact codes: the goal here is to fire `set_error` bursts,
+/// not to pin down per-call return values.
+fn burst_ghost_error(db: *mut obj_db_t, coll: &str) {
+    let mut rtxn: *mut obj_read_txn_t = ptr::null_mut();
+    // SAFETY: db valid; rtxn is a writable out-pointer.
+    let code = unsafe { obj_txn_begin_read(db, &raw mut rtxn) };
+    if code != OBJ_OK || rtxn.is_null() {
+        return;
+    }
+    let cs = CString::new(coll).expect("non-NUL");
+    let mut count: u64 = 0;
+    // SAFETY: rtxn valid; cs NUL-terminated UTF-8; out_count writable.
+    let _ = unsafe { obj_count_all(rtxn, cs.as_ptr(), &raw mut count) };
+    // SAFETY: rtxn valid and not yet ended.
+    unsafe { obj_txn_end_read(rtxn) };
+}
+
+/// Stress the error ring's seq-ordered reclamation: many writer threads
+/// record errors on one shared handle (bursts far wider than the
+/// 16-slot ring) while a reader thread spins on `obj_errmsg` and
+/// validates the bytes it hands back. Under the pre-fix out-of-order
+/// free, a preempted writer could republish a freed pointer as
+/// `last_error`, so the reader would eventually read freed / non-UTF-8
+/// storage (or crash under a sanitizer). With reclamation serialised,
+/// `last_error` always points at a live ring string.
+#[test]
+fn concurrent_error_bursts_keep_errmsg_valid() {
+    const WRITERS: usize = 32;
+    const ITERS: usize = 64;
+
+    let (_dir, db) = open_db("errmsg-stress.obj");
+    // Seed so `last_error` is non-null before the reader starts.
+    record_ghost_error(db, "seed_ghost");
+
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let reader_stop = Arc::clone(&stop);
+    let reader_db = SendDb(db);
+    let reader = std::thread::spawn(move || {
+        let reader_db = reader_db;
+        let db = reader_db.0;
+        let mut reads = 0u64;
+        while !reader_stop.load(Ordering::Relaxed) {
+            // SAFETY: db is live for the whole test; obj_errmsg never
+            // returns NULL.
+            let p = unsafe { obj_errmsg(db) };
+            assert!(!p.is_null(), "obj_errmsg must never return NULL");
+            // SAFETY: p is a non-null NUL-terminated C string owned by db.
+            let cstr = unsafe { CStr::from_ptr(p) };
+            assert!(
+                cstr.to_str().is_ok(),
+                "obj_errmsg handed back non-UTF-8 / freed bytes"
+            );
+            reads += 1;
+        }
+        assert!(reads > 0, "reader never observed a message");
+    });
+
+    let mut writers = Vec::with_capacity(WRITERS);
+    for w in 0..WRITERS {
+        let writer_db = SendDb(db);
+        writers.push(std::thread::spawn(move || {
+            let writer_db = writer_db;
+            let db = writer_db.0;
+            for i in 0..ITERS {
+                burst_ghost_error(db, &format!("burst_{w}_{i}"));
+            }
+        }));
+    }
+    for h in writers {
+        h.join().expect("writer thread joined");
+    }
+    stop.store(true, Ordering::Relaxed);
+    reader.join().expect("reader thread joined");
+
+    // The final published message is still a valid, readable string.
+    let final_msg = errmsg(db);
+    assert!(!final_msg.is_empty());
+
+    // SAFETY: db still open (all workers finished and joined).
     unsafe { obj_close(db) };
 }
 
