@@ -28,7 +28,7 @@ pub mod fault;
 
 pub mod lock;
 
-pub use crate::platform::env::{Entropy, OsEntropy, SeededEntropy};
+pub use crate::platform::env::{Clock, Entropy, OsEntropy, SeededEntropy, SimClock, SystemClock};
 pub use crate::platform::lock::{ReaderLock, WriterLock};
 
 use std::fs::{File, OpenOptions};

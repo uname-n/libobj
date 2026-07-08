@@ -32,10 +32,10 @@
 
 use std::os::raw::c_int;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::error::{Error, LockKind, Result};
-use crate::platform::FileHandle;
+use crate::platform::{Clock, FileHandle};
 
 /// Byte offset of the `WRITER_LOCK` (1 byte, exclusive) inside the
 /// `<db>.obj-lock` sidecar file.
@@ -172,10 +172,10 @@ impl FileHandle {
     ///
     /// - [`Error::Busy`] with `LockKind::Writer` on timeout.
     /// - [`Error::Io`] on any non-"would-block" syscall failure.
-    pub fn lock_writer(&self, timeout: Duration) -> Result<WriterLock> {
+    pub fn lock_writer(&self, timeout: Duration, clock: &dyn Clock) -> Result<WriterLock> {
         ensure_ofd_locks_supported()?;
         let fd = self.raw_fd();
-        retry_until_acquired(timeout, LockKind::Writer, || {
+        retry_until_acquired(timeout, LockKind::Writer, clock, || {
             try_lock_range(fd, WRITER_LOCK_OFFSET, 1, LockMode::Exclusive)
         })?;
         Ok(WriterLock {
@@ -199,7 +199,7 @@ impl FileHandle {
     /// - [`Error::Busy`] with `LockKind::Reader` on timeout (very
     ///   rare — shared locks rarely contend).
     /// - [`Error::Io`] on syscall failure.
-    pub fn lock_reader(&self, timeout: Duration) -> Result<ReaderLock> {
+    pub fn lock_reader(&self, timeout: Duration, clock: &dyn Clock) -> Result<ReaderLock> {
         ensure_ofd_locks_supported()?;
         let fd = self.raw_fd();
         let start_slot = next_reader_slot();
@@ -222,7 +222,7 @@ impl FileHandle {
             return Err(err);
         }
         let slot = READER_LOCK_RANGE_OFFSET + start_slot;
-        retry_until_acquired(timeout, LockKind::Reader, || {
+        retry_until_acquired(timeout, LockKind::Reader, clock, || {
             try_lock_range(fd, slot, 1, LockMode::Shared)
         })?;
         Ok(ReaderLock {
@@ -257,14 +257,25 @@ enum LockMode {
 }
 
 /// Bounded retry harness shared by `lock_writer` / `lock_reader`.
-/// The loop's upper bound is
-/// `deadline.elapsed() < timeout`; once `Instant::now() >= deadline`
-/// the function returns `Err(Error::Busy)`.
-fn retry_until_acquired<F>(timeout: Duration, kind: LockKind, mut once: F) -> Result<()>
+///
+/// Time and sleeps are drawn from the injected [`Clock`] so the loop is
+/// deterministic and non-blocking under the DST harness (a [`SimClock`]
+/// advances virtual time only on `sleep`). The loop's upper bound is
+/// `clock.now_millis() - start < timeout_millis`; once the elapsed
+/// virtual/real time reaches the timeout the function returns
+/// `Err(Error::Busy)`. A defensive iter counter bounds it further.
+///
+/// [`SimClock`]: crate::platform::SimClock
+fn retry_until_acquired<F>(
+    timeout: Duration,
+    kind: LockKind,
+    clock: &dyn Clock,
+    mut once: F,
+) -> Result<()>
 where
     F: FnMut() -> Result<bool>,
 {
-    let start = Instant::now();
+    let start = clock.now_millis();
     let mut backoff = INITIAL_BACKOFF;
     let timeout_millis = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
     let max_iters: u64 = timeout_millis.saturating_add(2);
@@ -277,10 +288,10 @@ where
         if once()? {
             return Ok(());
         }
-        if start.elapsed() >= timeout {
+        if clock.now_millis().saturating_sub(start) >= timeout_millis {
             return Err(Error::Busy { kind });
         }
-        std::thread::sleep(backoff);
+        clock.sleep(backoff);
         backoff = (backoff * 2).min(MAX_BACKOFF);
     }
 }
@@ -503,6 +514,8 @@ mod tests {
     #[cfg(unix)]
     use super::*;
     #[cfg(unix)]
+    use crate::platform::SystemClock;
+    #[cfg(unix)]
     use tempfile::TempDir;
 
     /// Create a file that's at least 4 KiB so the lock byte
@@ -556,7 +569,7 @@ mod tests {
             .expect("h1 must acquire");
         let start = std::time::Instant::now();
         let err = h2
-            .lock_writer(Duration::from_millis(50))
+            .lock_writer(Duration::from_millis(50), &SystemClock)
             .expect_err("must time out");
         let elapsed = start.elapsed();
         assert!(matches!(
@@ -579,9 +592,9 @@ mod tests {
         let h1 = FileHandle::open_or_create(dir.path().join("lock.obj")).expect("h1");
         let h2 = FileHandle::open_or_create(dir.path().join("lock.obj")).expect("h2");
         let h3 = FileHandle::open_or_create(dir.path().join("lock.obj")).expect("h3");
-        let g1 = h1.lock_reader(Duration::from_millis(50)).expect("r1");
-        let g2 = h2.lock_reader(Duration::from_millis(50)).expect("r2");
-        let g3 = h3.lock_reader(Duration::from_millis(50)).expect("r3");
+        let g1 = h1.lock_reader(Duration::from_millis(50), &SystemClock).expect("r1");
+        let g2 = h2.lock_reader(Duration::from_millis(50), &SystemClock).expect("r2");
+        let g3 = h3.lock_reader(Duration::from_millis(50), &SystemClock).expect("r3");
         drop((g1, g2, g3));
     }
 
@@ -592,9 +605,11 @@ mod tests {
         let _h0 = fresh_handle(&dir, "lock.obj");
         let h1 = FileHandle::open_or_create(dir.path().join("lock.obj")).expect("h1");
         let h2 = FileHandle::open_or_create(dir.path().join("lock.obj")).expect("h2");
-        let _wg = h1.lock_writer(Duration::from_millis(50)).expect("writer");
+        let _wg = h1
+            .lock_writer(Duration::from_millis(50), &SystemClock)
+            .expect("writer");
         let _rg = h2
-            .lock_reader(Duration::from_millis(50))
+            .lock_reader(Duration::from_millis(50), &SystemClock)
             .expect("reader must not collide");
     }
 
@@ -604,9 +619,13 @@ mod tests {
         let dir = TempDir::new().expect("tmp");
         let _h0 = fresh_handle(&dir, "lock.obj");
         let h = FileHandle::open_or_create(dir.path().join("lock.obj")).expect("h");
-        let g = h.lock_writer(Duration::from_millis(50)).expect("lock");
+        let g = h
+            .lock_writer(Duration::from_millis(50), &SystemClock)
+            .expect("lock");
         g.release().expect("release ok");
-        let _g2 = h.lock_writer(Duration::from_millis(50)).expect("relock");
+        let _g2 = h
+            .lock_writer(Duration::from_millis(50), &SystemClock)
+            .expect("relock");
     }
 
     #[test]
@@ -615,7 +634,9 @@ mod tests {
         let dir = TempDir::new().expect("tmp");
         let _h0 = fresh_handle(&dir, "lock.obj");
         let h = FileHandle::open_or_create(dir.path().join("lock.obj")).expect("h");
-        let g = h.lock_reader(Duration::from_millis(10)).expect("rlock");
+        let g = h
+            .lock_reader(Duration::from_millis(10), &SystemClock)
+            .expect("rlock");
         drop(g);
     }
 
