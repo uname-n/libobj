@@ -57,7 +57,7 @@ use std::time::Duration;
 use crate::error::{Error, LockKind, Result};
 use crate::pager::page::{Page, PageId};
 use crate::pager::{HeaderSnapshot, Pager, ReaderSnapshot};
-use crate::platform::{FileBackend, FileHandle, ReaderLock, WriterLock};
+use crate::platform::{Clock, FileBackend, FileHandle, ReaderLock, SystemClock, WriterLock};
 
 /// Default busy timeout for `WriteTxn::begin` and `ReadTxn::begin`
 /// when the caller does not pass a per-call deadline.  5 seconds
@@ -94,18 +94,46 @@ pub struct TxnEnv<F: FileBackend = FileHandle> {
     /// production `FileHandle`).  The handle owns its own fd so
     /// locking calls do not need the pager's mutex.
     lock_file: Option<Arc<FileHandle>>,
+    /// Time source for the write-serialization gate and the cross-
+    /// process-lock backoff/timeout loops.  Behind an `Arc<dyn Clock>`
+    /// (a cold-path trait object, like [`crate::platform::Entropy`]) so
+    /// the DST harness can substitute a deterministic, non-blocking
+    /// [`crate::platform::SimClock`] while production uses the real
+    /// [`SystemClock`].  Every acquire path reads its time and sleeps
+    /// only through this handle.
+    clock: Arc<dyn Clock>,
 }
 
 impl<F: FileBackend> TxnEnv<F> {
-    /// Construct an env wrapping the given pager.  `lock_file` is an
-    /// optional dedicated file handle for cross-process locks; pass
-    /// `None` for in-memory or fault-injection environments.
+    /// Construct an env wrapping the given pager, using the production
+    /// [`SystemClock`].  `lock_file` is an optional dedicated file
+    /// handle for cross-process locks; pass `None` for in-memory or
+    /// fault-injection environments.
+    ///
+    /// This is the convenience constructor for callers that do not care
+    /// about the clock seam; use [`Self::new_with_clock`] to inject a
+    /// deterministic [`crate::platform::SimClock`] under the DST harness.
     #[must_use]
     pub fn new(pager: Pager<F>, lock_file: Option<Arc<FileHandle>>) -> Self {
+        Self::new_with_clock(pager, lock_file, Arc::new(SystemClock))
+    }
+
+    /// Construct an env wrapping the given pager with an explicit
+    /// [`Clock`].  The DST harness passes a
+    /// [`crate::platform::SimClock`] so the write-gate and lock
+    /// backoff/timeout loops advance virtual time only on `sleep` —
+    /// deterministic and non-blocking.
+    #[must_use]
+    pub fn new_with_clock(
+        pager: Pager<F>,
+        lock_file: Option<Arc<FileHandle>>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         Self {
             pager: Arc::new(Mutex::new(pager)),
             write_serialization: Arc::new(AtomicBool::new(false)),
             lock_file,
+            clock,
         }
     }
 
@@ -116,6 +144,14 @@ impl<F: FileBackend> TxnEnv<F> {
     #[must_use]
     pub fn pager(&self) -> &Arc<Mutex<Pager<F>>> {
         &self.pager
+    }
+
+    /// The env's injected [`Clock`].  The acquire paths read time and
+    /// sleep only through this handle so the DST harness can drive them
+    /// deterministically.
+    #[must_use]
+    pub fn clock(&self) -> &Arc<dyn Clock> {
+        &self.clock
     }
 }
 
@@ -263,9 +299,10 @@ impl<'db, F: FileBackend> WriteTxn<'db, F> {
     ///
     /// As [`Self::begin`].
     pub fn acquire(env: &'db TxnEnv<F>, timeout: Duration) -> Result<WriteAcquire<F>> {
-        let write_guard = acquire_write_serialization(&env.write_serialization, timeout)?;
+        let clock = env.clock.as_ref();
+        let write_guard = acquire_write_serialization(&env.write_serialization, timeout, clock)?;
         let writer_lock = match env.lock_file.as_ref() {
-            Some(handle) => match handle.lock_writer(timeout) {
+            Some(handle) => match handle.lock_writer(timeout, clock) {
                 Ok(g) => Some(g),
                 Err(e) => {
                     drop(write_guard);
@@ -495,8 +532,9 @@ fn rollback_pending<F: FileBackend>(pager: &mut Pager<F>) {
 fn acquire_write_serialization(
     gate: &Arc<AtomicBool>,
     timeout: Duration,
+    clock: &dyn Clock,
 ) -> Result<WriteSerialGuard> {
-    let start = std::time::Instant::now();
+    let start = clock.now_millis();
     let mut backoff = Duration::from_millis(1);
     let max_backoff = Duration::from_millis(100);
     let timeout_millis = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
@@ -517,12 +555,12 @@ fn acquire_write_serialization(
                 gate: Arc::clone(gate),
             });
         }
-        if start.elapsed() >= timeout {
+        if clock.now_millis().saturating_sub(start) >= timeout_millis {
             return Err(Error::Busy {
                 kind: LockKind::WriterInProcess,
             });
         }
-        std::thread::sleep(backoff);
+        clock.sleep(backoff);
         backoff = (backoff * 2).min(max_backoff);
     }
 }
@@ -568,7 +606,7 @@ impl<'db, F: FileBackend> ReadTxn<'db, F> {
     /// See [`begin`](Self::begin).
     pub fn begin_with_timeout(env: &'db TxnEnv<F>, timeout: Duration) -> Result<Self> {
         let reader_lock = match env.lock_file.as_ref() {
-            Some(handle) => Some(handle.lock_reader(timeout)?),
+            Some(handle) => Some(handle.lock_reader(timeout, env.clock.as_ref())?),
             None => None,
         };
         let snapshot = {
@@ -624,7 +662,7 @@ mod tests {
     use super::*;
     use crate::pager::page::Page;
     use crate::pager::Config;
-    use crate::platform::FileHandle;
+    use crate::platform::{FileHandle, SimClock};
     use std::sync::Arc;
     use std::thread;
     use tempfile::TempDir;
@@ -689,6 +727,73 @@ mod tests {
         ));
         tx1.commit().expect("commit");
         let _tx3 = WriteTxn::begin(&env, Duration::from_millis(50)).expect("tx3");
+    }
+
+    /// Build an env whose clock is an injected [`SimClock`], returning
+    /// both so the test can inspect virtual time.  Mirrors `build_env`
+    /// but routes through `TxnEnv::new_with_clock`.
+    fn build_env_with_sim_clock(dir: &TempDir) -> (TxnEnv<FileHandle>, Arc<SimClock>) {
+        let path = dir.path().join("simclock.obj");
+        let mut pager = Pager::open(&path, Config::default()).expect("pager");
+        pager.begin_txn();
+        let a = pager.alloc_page().expect("alloc");
+        let mut page = Page::zeroed();
+        page.as_bytes_mut()[0] = 0;
+        pager.write_page(a, &page).expect("write");
+        let _ = pager.commit().expect("commit");
+        pager.end_txn();
+        let lock_path = crate::pager::lock_path_for(&path);
+        let lock_file = Arc::new(FileHandle::open_or_create(&lock_path).expect("lock file"));
+        lock_file.set_len(128).expect("lock sidecar len");
+        let clock = Arc::new(SimClock::new());
+        let env = TxnEnv::new_with_clock(pager, Some(lock_file), clock.clone());
+        (env, clock)
+    }
+
+    /// Acceptance criterion 2: a `SimClock`-driven env drives the write-
+    /// serialization gate to `Busy { WriterInProcess }` DETERMINISTICALLY
+    /// and WITHOUT real sleeping.  With a real `SystemClock` a 5 s
+    /// timeout against a held gate would block ~5 s; the `SimClock`
+    /// advances virtual time only on `sleep`, so the loop exhausts the
+    /// timeout instantly.
+    #[test]
+    fn sim_clock_drives_write_gate_to_busy_without_real_sleep() {
+        let dir = TempDir::new().expect("tmp");
+        let (env, clock) = build_env_with_sim_clock(&dir);
+
+        // First writer holds the in-process gate.
+        let tx1 = WriteTxn::begin(&env, Duration::from_millis(50)).expect("tx1");
+        assert_eq!(clock.now_millis(), 0, "uncontended begin never sleeps");
+
+        // Second writer contends: a 5 s virtual timeout must resolve to
+        // Busy essentially instantly on the real clock.
+        let wall_start = std::time::Instant::now();
+        let err = WriteTxn::begin(&env, Duration::from_secs(5)).expect_err("tx2 must be busy");
+        let wall = wall_start.elapsed();
+
+        assert!(
+            matches!(
+                err,
+                Error::Busy {
+                    kind: LockKind::WriterInProcess
+                }
+            ),
+            "contended gate must surface WriterInProcess busy",
+        );
+        assert!(
+            wall < Duration::from_secs(1),
+            "SimClock must not really sleep; took {wall:?}",
+        );
+        assert!(
+            clock.now_millis() >= 5000,
+            "virtual time must have advanced past the 5 s timeout; got {} ms",
+            clock.now_millis(),
+        );
+
+        // The gate is still sound: dropping tx1 lets a new writer proceed.
+        drop(tx1);
+        let tx3 = WriteTxn::begin(&env, Duration::from_millis(50)).expect("tx3 after release");
+        tx3.commit().expect("commit");
     }
 
     /// `WriteTxn` (and the new `WriteAcquire` /

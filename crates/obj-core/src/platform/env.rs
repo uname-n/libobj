@@ -1,4 +1,4 @@
-//! Injectable entropy source (L0).
+//! Injectable environment seams (L0): entropy and clock.
 //!
 //! Salt and nonce generation used to draw directly from the OS —
 //! `rand::rng()` for WAL / KDF salts, `getrandom` for AEAD nonces.
@@ -26,12 +26,34 @@
 //!   specified at the algorithm level, so a future `rand_chacha` bump
 //!   cannot silently change the seed-to-bytes mapping.
 //!
+//! # Clock
+//!
+//! The [`Clock`] seam is the time counterpart to [`Entropy`]. The
+//! write-serialization gate and the cross-process-lock retry loops
+//! measure elapsed time and back off with `std::thread::sleep`; both
+//! block real wall-clock time and read a real monotonic clock, which
+//! makes the deterministic-simulation harness slow and non-reproducible.
+//!
+//! - [`Clock`] is a trait object (`Arc<dyn Clock>`) for the same
+//!   cold-path reason as [`Entropy`]: the backoff/timeout paths are not
+//!   hot, so a generic parameter across the txn/lock layers would buy
+//!   nothing. Time is a plain `u64` millis counter rather than an opaque
+//!   [`Instant`] so the trait is dyn-friendly (no associated types).
+//! - [`SystemClock`] is the production source: `now_millis` reads a
+//!   process-start [`Instant`] baseline; `sleep` is `std::thread::sleep`.
+//! - [`SimClock`] is the DST source: virtual time advances ONLY on
+//!   `sleep`, which bumps an [`AtomicU64`]; `now_millis` reads that
+//!   counter without blocking. Every `elapsed >= timeout` decision then
+//!   becomes deterministic and instant.
+//!
 //! This module inherits `platform`'s no-`unsafe` posture; it performs
 //! no syscalls of its own.
 
 #![forbid(unsafe_code)]
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use rand::{RngCore as _, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
@@ -125,9 +147,114 @@ impl Entropy for SeededEntropy {
     }
 }
 
+/// A source of monotonic time and blocking sleeps for the write-
+/// serialization gate and the cross-process-lock retry loops.
+///
+/// Implementations MUST be `Send + Sync`: the [`Clock`] is held behind
+/// an `Arc<dyn Clock>` on the txn environment, which is shared and moved
+/// across threads. `Debug` is required so the owning env can keep
+/// deriving it.
+///
+/// Time is exposed as a `u64` millisecond counter rather than an opaque
+/// [`Instant`] so the trait carries no associated types and stays
+/// dyn-safe. Callers measure elapsed time as
+/// `clock.now_millis().saturating_sub(start)` and compare against a
+/// timeout expressed in milliseconds.
+pub trait Clock: Send + Sync + core::fmt::Debug {
+    /// Current time as a millisecond counter. Monotonic (never runs
+    /// backward across calls on the same clock); the absolute origin is
+    /// unspecified — only differences are meaningful.
+    fn now_millis(&self) -> u64;
+
+    /// Block for approximately `d`. Production sleeps the calling
+    /// thread; the simulation clock instead advances virtual time (see
+    /// [`SimClock`]).
+    fn sleep(&self, d: Duration);
+}
+
+/// Process-start baseline for [`SystemClock::now_millis`]. Initialised
+/// once, lazily, on first use so every [`SystemClock`] in the process
+/// shares one monotonic origin and the type stays zero-sized.
+fn process_start() -> Instant {
+    static START: OnceLock<Instant> = OnceLock::new();
+    *START.get_or_init(Instant::now)
+}
+
+/// Production clock backed by the OS monotonic clock and
+/// `std::thread::sleep`.
+///
+/// Zero-sized and cheap to clone; construct with [`SystemClock`] or
+/// [`SystemClock::default`].
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now_millis(&self) -> u64 {
+        // Saturate rather than panic: the process would have to run for
+        // ~584 million years to overflow a u64 of milliseconds.
+        u64::try_from(process_start().elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    fn sleep(&self, d: Duration) {
+        std::thread::sleep(d);
+    }
+}
+
+/// Deterministic virtual clock for the DST harness.
+///
+/// Virtual time starts at 0 and advances ONLY when [`Clock::sleep`] is
+/// called, by the sleep duration (in whole milliseconds). Because
+/// [`Clock::now_millis`] simply reads the counter and `sleep` never
+/// touches the real clock, every backoff/timeout loop that draws its
+/// time from a `SimClock` terminates instantly and identically on every
+/// run — no wall-clock wait.
+///
+/// The counter lives in an [`AtomicU64`] so the clock is `Sync` (the txn
+/// env that holds it crosses threads).
+#[derive(Debug, Default)]
+pub struct SimClock {
+    now_millis: AtomicU64,
+}
+
+impl SimClock {
+    /// Construct a virtual clock whose time starts at 0.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            now_millis: AtomicU64::new(0),
+        }
+    }
+}
+
+impl Clock for SimClock {
+    fn now_millis(&self) -> u64 {
+        self.now_millis.load(Ordering::Relaxed)
+    }
+
+    fn sleep(&self, d: Duration) {
+        // Saturate the per-sleep advance; the accumulator itself
+        // saturates on add so virtual time can never wrap.
+        let ms = u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+        let mut cur = self.now_millis.load(Ordering::Relaxed);
+        loop {
+            let next = cur.saturating_add(ms);
+            match self.now_millis.compare_exchange_weak(
+                cur,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(observed) => cur = observed,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Entropy, OsEntropy, SeededEntropy};
+    use super::{Clock, Entropy, OsEntropy, SeededEntropy, SimClock, SystemClock};
+    use std::time::Duration;
 
     #[test]
     fn same_seed_same_fill_stream() {
@@ -185,5 +312,46 @@ mod tests {
         os.fill_bytes(&mut buf);
         // Overwhelmingly unlikely to be all-zero from a real CSPRNG.
         assert!(buf.iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn clocks_are_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<SystemClock>();
+        assert_send_sync::<SimClock>();
+    }
+
+    #[test]
+    fn sim_clock_advances_only_on_sleep() {
+        let c = SimClock::new();
+        assert_eq!(c.now_millis(), 0, "virtual time starts at 0");
+        // now_millis is a pure read: repeated calls do not advance time.
+        assert_eq!(c.now_millis(), 0);
+        c.sleep(Duration::from_millis(5));
+        assert_eq!(c.now_millis(), 5, "sleep advances virtual time");
+        c.sleep(Duration::from_millis(95));
+        assert_eq!(c.now_millis(), 100, "advances are cumulative");
+    }
+
+    #[test]
+    fn sim_clock_sleep_does_not_block() {
+        // A multi-second virtual sleep must return effectively instantly.
+        let c = SimClock::new();
+        let wall = std::time::Instant::now();
+        c.sleep(Duration::from_secs(30));
+        assert!(
+            wall.elapsed() < Duration::from_millis(500),
+            "SimClock::sleep must not block on the real clock",
+        );
+        assert_eq!(c.now_millis(), 30_000);
+    }
+
+    #[test]
+    fn system_clock_time_is_monotonic() {
+        let c = SystemClock;
+        let a = c.now_millis();
+        c.sleep(Duration::from_millis(2));
+        let b = c.now_millis();
+        assert!(b >= a, "system clock must not run backward");
     }
 }
