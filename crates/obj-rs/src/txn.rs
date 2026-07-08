@@ -141,6 +141,12 @@ impl<'db> WriteTxn<'db> {
     ///
     /// # Errors
     ///
+    /// - [`Error::InvalidArgument`] if `T::COLLECTION` has an empty
+    ///   namespace segment (a leading `.`, e.g. `".orders"`), rejected
+    ///   by `try_split_namespace` before any catalog work.
+    /// - [`Error::AttachedDatabaseIsReadOnly`] if `T::COLLECTION` is
+    ///   namespaced (`<ns>.<name>`): attached databases are read-only,
+    ///   so a write handle cannot be opened against one.
     /// - [`Error::Busy`] if the pager / catalog mutex is poisoned.
     /// - Any error the pager / B-tree / postcard codec returns.
     pub fn collection<T: Document>(&mut self) -> Result<Collection<'_, T>> {
@@ -907,6 +913,9 @@ impl<'db> ReadTxn<'db> {
     ///
     /// # Errors
     ///
+    /// - [`Error::InvalidArgument`] if `collection` has an empty
+    ///   namespace segment (a leading `.`, e.g. `".orders"`), which
+    ///   `try_split_namespace` rejects before any lookup.
     /// - [`Error::CollectionNamespaceUnknown`] if `collection`
     ///   carries a namespace prefix that is not attached.
     fn resolve_read_target<'a>(&'a self, collection: &'a str) -> Result<ReadTarget<'a>> {
@@ -942,6 +951,8 @@ impl<'db> ReadTxn<'db> {
     ///
     /// # Errors
     ///
+    /// - [`Error::InvalidArgument`] if `collection` has an empty
+    ///   namespace segment (a leading `.`, e.g. `".orders"`).
     /// - [`Error::CollectionNotFound`] if the collection is unknown.
     /// - [`Error::Corruption`] if the on-disk record is malformed.
     /// - Pager / catalog errors propagated.
@@ -1002,6 +1013,8 @@ impl<'db> ReadTxn<'db> {
     ///
     /// # Errors
     ///
+    /// - [`Error::InvalidArgument`] if `collection` has an empty
+    ///   namespace segment (a leading `.`, e.g. `".orders"`).
     /// - [`Error::CollectionNotFound`] if the collection is unknown at
     ///   the snapshot.
     /// - [`Error::UnsupportedSchemaFormat`] / [`Error::Codec`] if the
@@ -1086,7 +1099,9 @@ impl<'db> ReadTxn<'db> {
     ///
     /// # Errors
     ///
-    /// As [`Self::snapshot_descriptor`] plus pager / B-tree.
+    /// - [`Error::InvalidArgument`] if `collection` has an empty
+    ///   namespace segment (a leading `.`, e.g. `".orders"`).
+    /// - As [`Self::snapshot_descriptor`] plus pager / B-tree.
     #[doc(hidden)]
     pub fn count_all_raw(&self, collection: &str) -> Result<u64> {
         let target = self.resolve_read_target(collection)?;
@@ -1128,6 +1143,8 @@ impl<'db> ReadTxn<'db> {
     ///
     /// # Errors
     ///
+    /// - [`Error::InvalidArgument`] if `collection` has an empty
+    ///   namespace segment (a leading `.`, e.g. `".orders"`).
     /// - [`Error::IndexNotFound`] / [`Error::CollectionNotFound`].
     /// - Pager / B-tree errors propagated.
     #[doc(hidden)]
