@@ -231,7 +231,13 @@ impl CycleOpener<FaultyFileHandle> for FaultyOpener {
         let main = FaultyFileHandle::new(FileHandle::open_or_create(path)?, self.main_plan());
         let wal_path = wal_path_for(path);
         let wal = FaultyFileHandle::new(FileHandle::open_or_create(&wal_path)?, self.wal_plan());
-        let mut p = Pager::<FaultyFileHandle>::open_with_backends(main, wal, wal_path, config)?;
+        let mut p = Pager::<FaultyFileHandle>::open_with_backends(
+            main,
+            wal,
+            wal_path,
+            config,
+            std::sync::Arc::new(obj_core::platform::OsEntropy),
+        )?;
         p.begin_txn();
         Ok(p)
     }

@@ -12,12 +12,13 @@ pub mod frame;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::pager::page::{Page, PageId, PAGE_SIZE};
+use crate::platform::env::{Entropy, OsEntropy};
 use crate::platform::{remove_file_if_exists, FileBackend, FileHandle, SyncMode};
 use crate::wal::frame::{
     decode_frame_header_classified, encode_frame_header, frame_size_for, FrameDecode, FrameHeader,
@@ -262,6 +263,12 @@ pub struct Wal<F: FileBackend = FileHandle> {
     /// pager's `derived_key` — the design specifically calls out
     /// that the WAL and the main file share one key.
     key: Option<WalKey>,
+    /// Injected entropy source for the generation salt (and, on
+    /// encryption builds, each frame's AEAD nonce). `Arc<dyn Entropy>`
+    /// so the DST harness can substitute a seeded, reproducible source;
+    /// production carries [`OsEntropy`]. Cold path — never touched on a
+    /// read.
+    entropy: Arc<dyn Entropy>,
 }
 
 /// An in-progress WAL transaction.
@@ -297,7 +304,7 @@ impl Wal<FileHandle> {
     /// Returns [`Error::Io`] on syscall failure.
     pub fn create_fresh(path: &Path, config: WalConfig) -> Result<Self> {
         let file = FileHandle::open_or_create(path)?;
-        Self::create_fresh_with(file, path.to_path_buf(), config)
+        Self::create_fresh_with(file, path.to_path_buf(), config, Arc::new(OsEntropy))
     }
 
     /// Walk the on-disk WAL at `path` and produce a [`Recovered`]
@@ -327,14 +334,19 @@ impl<F: FileBackend> Wal<F> {
     /// Create or truncate the WAL sidecar at `path` to a fresh,
     /// empty WAL on top of an already-opened backend `file`. Any
     /// existing content is overwritten with a new WAL header carrying
-    /// a freshly-sampled generation salt.
+    /// a freshly-sampled generation salt drawn from `entropy`.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Io`] on syscall failure.
-    pub fn create_fresh_with(file: F, path: PathBuf, config: WalConfig) -> Result<Self> {
+    pub fn create_fresh_with(
+        file: F,
+        path: PathBuf,
+        config: WalConfig,
+        entropy: Arc<dyn Entropy>,
+    ) -> Result<Self> {
         file.set_len(0)?;
-        let salt = fresh_salt();
+        let salt = fresh_salt(entropy.as_ref());
         write_wal_header(&file, salt)?;
         file.sync_data(config.sync_mode)?;
         Ok(Self {
@@ -346,6 +358,7 @@ impl<F: FileBackend> Wal<F> {
             committed_frames: 0,
             config,
             key: None,
+            entropy,
         })
     }
 
@@ -367,6 +380,11 @@ impl<F: FileBackend> Wal<F> {
     /// `salt`, `next_lsn`, `committed_frames`, and `end_offset` are
     /// taken from `recovered`; the caller separately merges
     /// `recovered.view` into the pager's in-memory state.
+    // allow: the recovered-meta fields (salt, next_lsn, end_offset,
+    // committed_frames) are each a distinct scalar the caller already
+    // holds separately from recovery; bundling them into a struct here
+    // would only move the same 8 values one call frame up.
+    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn from_recovered_meta(
         file: F,
@@ -376,6 +394,7 @@ impl<F: FileBackend> Wal<F> {
         end_offset: u64,
         committed_frames: u64,
         config: WalConfig,
+        entropy: Arc<dyn Entropy>,
     ) -> Self {
         Self {
             file,
@@ -386,6 +405,7 @@ impl<F: FileBackend> Wal<F> {
             committed_frames,
             config,
             key: None,
+            entropy,
         }
     }
 
@@ -529,7 +549,7 @@ impl<F: FileBackend> Wal<F> {
     ///
     /// Returns [`Error::Io`] on syscall failure.
     pub fn reset_after_checkpoint(&mut self) -> Result<()> {
-        let new_salt = next_salt(self.salt);
+        let new_salt = next_salt(self.entropy.as_ref(), self.salt);
         write_wal_header(&self.file, new_salt)?;
         self.file.sync_data(self.config.sync_mode)?;
         self.file.set_len(WAL_HEADER_SIZE as u64)?;
@@ -656,6 +676,7 @@ impl<F: FileBackend> WalTxn<'_, F> {
                 page,
                 self.wal.key.as_ref(),
                 &mut scratch,
+                self.wal.entropy.as_ref(),
             )?;
             last_lsn = lsn;
             offset = offset
@@ -1166,18 +1187,17 @@ fn bounded_frame_limit(size_limit: u64, frame_size: usize) -> u64 {
     size_limit / frame_size as u64 + 1
 }
 
-/// Generate a fresh 32-bit salt from the OS RNG. Used at first WAL
-/// open and at every checkpoint rotation.
-fn fresh_salt() -> u32 {
-    let mut rng = rand::rng();
-    rng.next_u32()
+/// Generate a fresh 32-bit salt from the injected [`Entropy`]. Used
+/// at first WAL open and at every checkpoint rotation.
+fn fresh_salt(entropy: &dyn Entropy) -> u32 {
+    entropy.next_u32()
 }
 
 /// Generate the next-generation salt. Guarantees `next != current`
-/// even if the OS RNG returns the same value back-to-back (rare but
-/// theoretically possible with a constant-output mock RNG).
-fn next_salt(current: u32) -> u32 {
-    let mut candidate = fresh_salt();
+/// even if the source returns the same value back-to-back (rare but
+/// theoretically possible with a constant-output mock source).
+fn next_salt(entropy: &dyn Entropy, current: u32) -> u32 {
+    let mut candidate = fresh_salt(entropy);
     if candidate == current {
         candidate = current.wrapping_add(1);
     }
@@ -1203,6 +1223,7 @@ fn write_frame<F: FileBackend>(
     page: &Page,
     key: Option<&WalKey>,
     scratch: &mut [u8],
+    entropy: &dyn Entropy,
 ) -> Result<()> {
     debug_assert_eq!(
         scratch.len(),
@@ -1215,18 +1236,20 @@ fn write_frame<F: FileBackend>(
     let Some(key) = key else {
         return file.write_all_at(frame_buf, offset);
     };
-    encrypt_frame_body(key, frame_buf, offset, file)
+    encrypt_frame_body(key, frame_buf, offset, file, entropy)
 }
 
 /// Encrypt a stamped 4160-byte plaintext frame
 /// buffer (`[header][plaintext_body]`) into a 4200-byte encrypted
 /// physical frame (`[header][ciphertext_body][nonce][tag]`) and
-/// write it to `file` at `offset`.
+/// write it to `file` at `offset`. The AEAD nonce is drawn from
+/// `entropy`.
 fn encrypt_frame_body<F: FileBackend>(
     key: &WalKey,
     plain_frame: &[u8],
     offset: u64,
     file: &F,
+    entropy: &dyn Entropy,
 ) -> Result<()> {
     debug_assert_eq!(plain_frame.len(), FRAME_SIZE);
     #[cfg(feature = "encryption")]
@@ -1238,13 +1261,13 @@ fn encrypt_frame_body<F: FileBackend>(
         let mut body_phys = [0u8; PAGE_SIZE + FRAME_AEAD_SUFFIX_SIZE];
         let mut ad = [0u8; 16];
         ad.copy_from_slice(&plain_frame[..16]);
-        wal_encrypt(key, &ad, &body_pt, &mut body_phys)?;
+        wal_encrypt(key, &ad, &body_pt, &mut body_phys, entropy)?;
         out[FRAME_HEADER_SIZE..].copy_from_slice(&body_phys);
         file.write_all_at(&out, offset)
     }
     #[cfg(not(feature = "encryption"))]
     {
-        let _ = (key, plain_frame, offset, file);
+        let _ = (key, plain_frame, offset, file, entropy);
         Err(Error::FormatFeatureUnsupported {
             feature: "encryption",
         })
@@ -1253,8 +1276,8 @@ fn encrypt_frame_body<F: FileBackend>(
 
 /// XChaCha20-Poly1305 encrypt a 4096-byte body
 /// into a 4136-byte (body || nonce || tag) buffer, with AD = `ad`.
-/// The nonce is `XChaCha20`'s 24-byte (192-bit) extended nonce.
-/// Returns [`Error::Io`] on CSPRNG failure or
+/// The nonce is `XChaCha20`'s 24-byte (192-bit) extended nonce, drawn
+/// from the injected `entropy`. Returns
 /// [`Error::EncryptionKeyInvalid`] on the structurally-unreachable
 /// AEAD error.
 #[cfg(feature = "encryption")]
@@ -1263,12 +1286,12 @@ fn wal_encrypt(
     ad: &[u8; 16],
     plaintext: &[u8; PAGE_SIZE],
     out: &mut [u8; PAGE_SIZE + FRAME_AEAD_SUFFIX_SIZE],
+    entropy: &dyn Entropy,
 ) -> Result<()> {
     use chacha20poly1305::aead::{AeadInPlace, KeyInit};
     use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
     let mut nonce_bytes = [0u8; 24];
-    getrandom::getrandom(&mut nonce_bytes)
-        .map_err(|e| Error::Io(std::io::Error::other(format!("getrandom failure: {e}"))))?;
+    entropy.fill_bytes(&mut nonce_bytes);
     let nonce = XNonce::from_slice(&nonce_bytes);
     out[..PAGE_SIZE].copy_from_slice(plaintext);
     let cipher = XChaCha20Poly1305::new(Key::from_slice(key.as_bytes()));

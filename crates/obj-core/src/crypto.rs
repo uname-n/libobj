@@ -10,8 +10,9 @@
 //! - **Physical page** in an encrypted file: `4096 + 24 + 16 = 4136`
 //!   bytes = `ciphertext || nonce || tag`.
 //! - **Nonce**: 24 random bytes (`XChaCha20`'s extended 192-bit nonce),
-//!   generated freshly on every page write via the [`getrandom`]
-//!   crate. No nonce-counter persistence is required. The 192-bit
+//!   generated freshly on every page write from the injected
+//!   [`Entropy`](crate::platform::Entropy) source. No nonce-counter
+//!   persistence is required. The 192-bit
 //!   width removes the birthday-bound rewrite ceiling that a 96-bit
 //!   random nonce would impose under a single per-file key.
 //! - **Tag**: 16-byte Poly1305 authentication tag.
@@ -32,6 +33,7 @@ use hkdf::Hkdf;
 use sha2::Sha256;
 
 use crate::error::{Error, Result};
+use crate::platform::env::Entropy;
 
 /// Logical page size in bytes (4 KiB).
 pub const LOGICAL_PAGE_SIZE: usize = 4096;
@@ -89,8 +91,11 @@ pub fn derive_page_key(
 /// Encrypt a 4096-byte logical page into a 4136-byte physical
 /// representation. The output layout is `ciphertext || nonce || tag`.
 ///
-/// A fresh 24-byte nonce is drawn from the OS CSPRNG on every call,
-/// so callers do not need to track a nonce counter.
+/// A fresh 24-byte nonce is drawn from the injected `entropy` source
+/// on every call, so callers do not need to track a nonce counter.
+/// Production passes
+/// [`OsEntropy`](crate::platform::OsEntropy) (OS CSPRNG); the DST
+/// harness passes a seeded source for reproducible nonces.
 ///
 /// `page_id` is bound to the ciphertext via the AEAD's associated
 /// data: an attacker who relocates an encrypted page from slot `N`
@@ -99,8 +104,6 @@ pub fn derive_page_key(
 ///
 /// # Errors
 ///
-/// - [`Error::Io`] (wrapping a `getrandom` failure) if the OS CSPRNG
-///   is unavailable.
 /// - [`Error::EncryptionKeyInvalid`] if the AEAD encryptor signals
 ///   failure. This is structurally unreachable for XChaCha20-Poly1305
 ///   on inputs of bounded size, but we surface it as a real error
@@ -110,10 +113,10 @@ pub fn encrypt_page(
     page_id: u64,
     plaintext: &[u8; LOGICAL_PAGE_SIZE],
     out: &mut [u8; PHYSICAL_ENCRYPTED_PAGE_SIZE],
+    entropy: &dyn Entropy,
 ) -> Result<()> {
     let mut nonce_bytes = [0u8; NONCE_SIZE];
-    getrandom::getrandom(&mut nonce_bytes)
-        .map_err(|e| Error::Io(std::io::Error::other(format!("getrandom failure: {e}"))))?;
+    entropy.fill_bytes(&mut nonce_bytes);
     let nonce = XNonce::from_slice(&nonce_bytes);
 
     out[..LOGICAL_PAGE_SIZE].copy_from_slice(plaintext);
@@ -168,6 +171,7 @@ mod tests {
         decrypt_page, derive_page_key, encrypt_page, KDF_SALT_SIZE, KEY_SIZE, LOGICAL_PAGE_SIZE,
         NONCE_SIZE, PHYSICAL_ENCRYPTED_PAGE_SIZE,
     };
+    use crate::platform::env::OsEntropy;
 
     fn test_key() -> [u8; KEY_SIZE] {
         let mut k = [0u8; KEY_SIZE];
@@ -232,7 +236,7 @@ mod tests {
         let key = derive_page_key(&test_key(), &test_salt()).expect("derive");
         let pt = test_plaintext();
         let mut ct = [0u8; PHYSICAL_ENCRYPTED_PAGE_SIZE];
-        encrypt_page(&key, 7, &pt, &mut ct).expect("encrypt");
+        encrypt_page(&key, 7, &pt, &mut ct, &OsEntropy).expect("encrypt");
         let mut decrypted = [0u8; LOGICAL_PAGE_SIZE];
         decrypt_page(&key, 7, &ct, &mut decrypted).expect("decrypt");
         assert_eq!(decrypted, pt);
@@ -246,7 +250,7 @@ mod tests {
         let wrong_key = derive_page_key(&wrong_user, &test_salt()).expect("derive");
         let pt = test_plaintext();
         let mut ct = [0u8; PHYSICAL_ENCRYPTED_PAGE_SIZE];
-        encrypt_page(&key, 7, &pt, &mut ct).expect("encrypt");
+        encrypt_page(&key, 7, &pt, &mut ct, &OsEntropy).expect("encrypt");
         let mut decrypted = [0u8; LOGICAL_PAGE_SIZE];
         let err =
             decrypt_page(&wrong_key, 7, &ct, &mut decrypted).expect_err("wrong key must fail");
@@ -258,7 +262,7 @@ mod tests {
         let key = derive_page_key(&test_key(), &test_salt()).expect("derive");
         let pt = test_plaintext();
         let mut ct = [0u8; PHYSICAL_ENCRYPTED_PAGE_SIZE];
-        encrypt_page(&key, 11, &pt, &mut ct).expect("encrypt");
+        encrypt_page(&key, 11, &pt, &mut ct, &OsEntropy).expect("encrypt");
         ct[100] ^= 0x01;
         let mut decrypted = [0u8; LOGICAL_PAGE_SIZE];
         let err = decrypt_page(&key, 11, &ct, &mut decrypted).expect_err("bit flip must fail");
@@ -270,7 +274,7 @@ mod tests {
         let key = derive_page_key(&test_key(), &test_salt()).expect("derive");
         let pt = test_plaintext();
         let mut ct = [0u8; PHYSICAL_ENCRYPTED_PAGE_SIZE];
-        encrypt_page(&key, 3, &pt, &mut ct).expect("encrypt");
+        encrypt_page(&key, 3, &pt, &mut ct, &OsEntropy).expect("encrypt");
         ct[LOGICAL_PAGE_SIZE] ^= 0x40;
         let mut decrypted = [0u8; LOGICAL_PAGE_SIZE];
         let err = decrypt_page(&key, 3, &ct, &mut decrypted).expect_err("nonce flip must fail");
@@ -282,7 +286,7 @@ mod tests {
         let key = derive_page_key(&test_key(), &test_salt()).expect("derive");
         let pt = test_plaintext();
         let mut ct = [0u8; PHYSICAL_ENCRYPTED_PAGE_SIZE];
-        encrypt_page(&key, 3, &pt, &mut ct).expect("encrypt");
+        encrypt_page(&key, 3, &pt, &mut ct, &OsEntropy).expect("encrypt");
         ct[PHYSICAL_ENCRYPTED_PAGE_SIZE - 1] ^= 0x80;
         let mut decrypted = [0u8; LOGICAL_PAGE_SIZE];
         let err = decrypt_page(&key, 3, &ct, &mut decrypted).expect_err("tag flip must fail");
@@ -294,7 +298,7 @@ mod tests {
         let key = derive_page_key(&test_key(), &test_salt()).expect("derive");
         let pt = test_plaintext();
         let mut ct = [0u8; PHYSICAL_ENCRYPTED_PAGE_SIZE];
-        encrypt_page(&key, 42, &pt, &mut ct).expect("encrypt");
+        encrypt_page(&key, 42, &pt, &mut ct, &OsEntropy).expect("encrypt");
         let mut decrypted = [0u8; LOGICAL_PAGE_SIZE];
         let err =
             decrypt_page(&key, 43, &ct, &mut decrypted).expect_err("swapped page-id must fail");
@@ -307,8 +311,8 @@ mod tests {
         let pt = test_plaintext();
         let mut ct1 = [0u8; PHYSICAL_ENCRYPTED_PAGE_SIZE];
         let mut ct2 = [0u8; PHYSICAL_ENCRYPTED_PAGE_SIZE];
-        encrypt_page(&key, 1, &pt, &mut ct1).expect("encrypt 1");
-        encrypt_page(&key, 1, &pt, &mut ct2).expect("encrypt 2");
+        encrypt_page(&key, 1, &pt, &mut ct1, &OsEntropy).expect("encrypt 1");
+        encrypt_page(&key, 1, &pt, &mut ct2, &OsEntropy).expect("encrypt 2");
         assert_ne!(ct1[..LOGICAL_PAGE_SIZE], ct2[..LOGICAL_PAGE_SIZE]);
         assert_ne!(
             ct1[LOGICAL_PAGE_SIZE..LOGICAL_PAGE_SIZE + NONCE_SIZE],

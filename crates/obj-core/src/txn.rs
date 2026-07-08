@@ -925,8 +925,14 @@ mod tests {
         };
         // threshold = 1 -> every non-empty commit auto-checkpoints.
         let cfg = Config::default().with_checkpoint_threshold(1);
-        let pager = Pager::<ArmedFailHandle>::open_with_backends(main, wal, wal_path, cfg)
-            .expect("open with backends");
+        let pager = Pager::<ArmedFailHandle>::open_with_backends(
+            main,
+            wal,
+            wal_path,
+            cfg,
+            std::sync::Arc::new(crate::platform::OsEntropy),
+        )
+        .expect("open with backends");
         let env = TxnEnv::new(pager, None);
 
         // Baseline txn (unarmed): commit A; its auto-checkpoint succeeds.

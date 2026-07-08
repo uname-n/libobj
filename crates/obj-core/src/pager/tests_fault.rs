@@ -18,10 +18,12 @@ use std::panic::AssertUnwindSafe;
 
 use tempfile::TempDir;
 
+use std::sync::Arc;
+
 use crate::pager::page::{Page, PageId};
 use crate::pager::{wal_path_for, Config, Pager};
 use crate::platform::fault::{FaultPlan, FaultyFileHandle, FAULT_CRASH_MARKER};
-use crate::platform::FileHandle;
+use crate::platform::{FileHandle, OsEntropy};
 
 fn open_faulty(
     main_path: &std::path::Path,
@@ -32,7 +34,13 @@ fn open_faulty(
     let main = FaultyFileHandle::new(FileHandle::open_or_create(main_path)?, main_plan);
     let wal_path = wal_path_for(main_path);
     let wal = FaultyFileHandle::new(FileHandle::open_or_create(&wal_path)?, wal_plan);
-    let mut p = Pager::<FaultyFileHandle>::open_with_backends(main, wal, wal_path, config)?;
+    let mut p = Pager::<FaultyFileHandle>::open_with_backends(
+        main,
+        wal,
+        wal_path,
+        config,
+        Arc::new(OsEntropy),
+    )?;
     p.begin_txn();
     Ok(p)
 }
@@ -583,7 +591,8 @@ fn growing_commit_issues_exactly_one_fsync() {
         fsyncs: Arc::clone(&wal_fsyncs),
     };
     let mut p =
-        Pager::<CountingHandle>::open_with_backends(main, wal, wal_path, cfg).expect("open");
+        Pager::<CountingHandle>::open_with_backends(main, wal, wal_path, cfg, Arc::new(OsEntropy))
+            .expect("open");
     p.begin_txn();
     main_fsyncs.store(0, Ordering::SeqCst);
     wal_fsyncs.store(0, Ordering::SeqCst);
@@ -715,8 +724,14 @@ fn auto_checkpoint_failure_after_wal_durability_keeps_commit_atomic() {
         armed: Arc::new(AtomicBool::new(false)),
     };
     let cfg = Config::default().with_checkpoint_threshold(1);
-    let mut p = Pager::<ArmedFailHandle>::open_with_backends(main, wal, wal_path, cfg)
-        .expect("open with backends");
+    let mut p = Pager::<ArmedFailHandle>::open_with_backends(
+        main,
+        wal,
+        wal_path,
+        cfg,
+        Arc::new(OsEntropy),
+    )
+    .expect("open with backends");
     p.begin_txn();
 
     // Baseline: commit A unarmed; its auto-checkpoint succeeds and

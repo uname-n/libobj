@@ -21,11 +21,14 @@
 
 #![deny(unsafe_code)]
 
+pub mod env;
+
 #[cfg(any(test, feature = "fault-injection"))]
 pub mod fault;
 
 pub mod lock;
 
+pub use crate::platform::env::{Entropy, OsEntropy, SeededEntropy};
 pub use crate::platform::lock::{ReaderLock, WriterLock};
 
 use std::fs::{File, OpenOptions};
