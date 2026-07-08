@@ -370,9 +370,9 @@ typedef struct {
 
 /**
  * Operation is not supported in this build / for this database
- * (e.g. `obj_backup_to` on an in-memory database, an attempt to
- * mutate an attached read-only attachment, an unimplemented
- * schema migration).
+ * (e.g. `obj_backup_to` on an in-memory database, backing up an
+ * encrypted database, an attempt to mutate an attached read-only
+ * attachment, an unimplemented schema migration).
  */
 #define OBJ_ERR_UNSUPPORTED 7
 
@@ -449,6 +449,9 @@ extern "C" {
 /**
  * Take a hot backup of `db` to `dest`. The destination MUST NOT
  * already exist.
+ *
+ * Returns [`OBJ_ERR_UNSUPPORTED`] for a database that cannot be hot-
+ * backed up — an in-memory pager or an encrypted pager.
  *
  * # Safety
  *
@@ -794,9 +797,11 @@ obj_error_t obj_find_unique(obj_read_txn_t *txn,
  * width `value_len` mismatch, non-UTF-8 `STRING` bytes, or an
  * embedded NUL the encoding rejects) the call writes `*out_len = 0`
  * and returns the error code WITHOUT touching `out`. `*out_len` is
- * therefore always written whenever `out_len` is non-null: the
- * encoded (or required) length on `OBJ_OK` and the too-small path,
- * and `0` on a validation failure.
+ * written on `OBJ_OK`, the too-small path, and value/kind validation
+ * failures: the encoded (or required) length on `OBJ_OK` and the
+ * too-small path, and `0` on a validation failure. It is left
+ * untouched only by the initial NULL-pointer argument checks, which
+ * return [`OBJ_ERR_INVALID_ARG`] before `*out_len` is written.
  *
  * # Safety
  *
