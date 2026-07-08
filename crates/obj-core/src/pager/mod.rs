@@ -1562,11 +1562,19 @@ impl<F: FileBackend> Pager<F> {
         // amortised once-per-threshold path, never a read hot path.
         let (view_pages, staged_header): (Vec<(PageId, Arc<Page>)>, Option<Page>) =
             if let Some(state) = self.wal.as_ref() {
-                let pages: Vec<(PageId, Arc<Page>)> = state
+                let mut pages: Vec<(PageId, Arc<Page>)> = state
                     .view
                     .iter()
                     .map(|(id, page)| (*id, Arc::clone(page)))
                     .collect();
+                // Sort by PageId so the write-back (and, for encrypted
+                // DBs, the per-page nonce draw from the injected Entropy
+                // stream) happens in a deterministic order regardless of
+                // the source HashMap's iteration order — mirroring the
+                // WAL-commit sort in `commit_inner`. Without this, two
+                // same-seed runs pair pages with different nonces and the
+                // encrypted main file diverges byte-for-byte.
+                pages.sort_unstable_by_key(|(id, _)| id.get());
                 (pages, state.view_header.clone())
             } else {
                 return Ok(());
