@@ -138,7 +138,7 @@ impl StoredSchema {
     /// first (offset 0) and rejecting any value this build does not
     /// understand.
     ///
-    /// Before postcard touches the bytes, [`ensure_schema_depth_bounded`]
+    /// Before postcard touches the bytes, `ensure_schema_depth_bounded`
     /// pre-scans them iteratively and rejects a row whose `schema` field
     /// nests deeper than [`MAX_SCHEMA_DEPTH`]. The serde-derive
     /// `Deserialize` for the self-referential [`DynamicSchema`] recurses

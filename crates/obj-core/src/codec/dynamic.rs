@@ -810,7 +810,8 @@ fn walk_schema<'a>(bytes: &'a [u8], schema: &DynamicSchema) -> Result<(Dynamic, 
     // Running count of materialized `Dynamic` nodes. Each `decode_slot`
     // call produces exactly one node (a scalar or a composite container),
     // so this is the walker's analogue of `decode_value`'s `nodes` and is
-    // capped at the same `MAX_DYNAMIC_NODES` ceiling `Dynamic` documents.
+    // capped at the same `MAX_DYNAMIC_NODES` ceiling that whole-document
+    // `Dynamic` decoding uses.
     // It is the primary total-work bound; `iter_cap` remains only as a
     // belt-and-suspenders backstop on the stack-depth path.
     let mut nodes: usize = 0;
@@ -1684,7 +1685,8 @@ mod tests {
         ]);
         let schema = DynamicSchema::seq(elem);
         // Forge the outer length to 65 535 (`MAX_DYNAMIC_NODES - 1`, so it
-        // passes the per-Seq length guard) as a LEB128 varint: 0xFFFF.
+        // passes the per-Seq length guard) as a LEB128 varint: the three
+        // bytes `FF FF 03` (65 535 does not fit in two LEB128 bytes).
         assert_eq!(MAX_DYNAMIC_NODES, 65_536);
         let bytes = [0xFF_u8, 0xFF, 0x03];
         let err = Dynamic::from_postcard_bytes(&bytes, &schema).expect_err("node ceiling");

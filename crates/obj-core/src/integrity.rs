@@ -404,7 +404,7 @@ fn verify_level_invariant(
     }
 }
 
-/// Walk the freelist chain starting at `head`, inserting every link
+/// Walk the freelist chain starting at `head_raw`, inserting every link
 /// page into `reachable` and recording any chain breakage into
 /// `failures`. Returns the number of freelist link pages walked.
 ///

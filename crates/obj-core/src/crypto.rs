@@ -11,7 +11,7 @@
 //!   bytes = `ciphertext || nonce || tag`.
 //! - **Nonce**: 24 random bytes (`XChaCha20`'s extended 192-bit nonce),
 //!   generated freshly on every page write from the injected
-//!   [`Entropy`](crate::platform::Entropy) source. No nonce-counter
+//!   [`Entropy`] source. No nonce-counter
 //!   persistence is required. The 192-bit
 //!   width removes the birthday-bound rewrite ceiling that a 96-bit
 //!   random nonce would impose under a single per-file key.
@@ -94,7 +94,7 @@ pub fn derive_page_key(
 /// A fresh 24-byte nonce is drawn from the injected `entropy` source
 /// on every call, so callers do not need to track a nonce counter.
 /// Production passes
-/// [`OsEntropy`](crate::platform::OsEntropy) (OS CSPRNG); the DST
+/// [`OsEntropy`] (OS CSPRNG); the DST
 /// harness passes a seeded source for reproducible nonces.
 ///
 /// `page_id` is bound to the ciphertext via the AEAD's associated

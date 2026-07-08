@@ -1191,7 +1191,8 @@ mod tests {
 
     #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
     enum Wide {
-        #[allow(clippy::many_single_char_names)] // allow: an 11-field tuple variant is the point of this regression test.
+        // allow: an 11-field tuple variant is the point of this regression test.
+        #[allow(clippy::many_single_char_names)]
         Eleven(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64),
     }
 
